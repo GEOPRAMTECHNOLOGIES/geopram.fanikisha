@@ -32,6 +32,8 @@ def health():
   return jsonify(ok=False,service="fluent-business-automation",error="MongoDB connection failed"),503
 @app.post("/api/auth/register")
 def register():
+ setting=db().settings.find_one({"key":"registration_enabled"})
+ if setting is not None and not setting.get("value",True):return jsonify(error="Client registration is currently disabled"),403
  d=request.get_json() or {};email=d.get("email","").strip().lower();password=d.get("password","");name=d.get("businessName","").strip()
  if not email or not name or len(password)<12:return jsonify(error="Business name, email and a 12+ character password are required"),400
  if db().users.find_one({"email":email}):return jsonify(error="Account already exists"),409
@@ -47,6 +49,11 @@ def verify_email():
  tok=db().verification_tokens.find_one({"userId":u["_id"],"used":False},sort=[("expiresAt",-1)])
  if not tok or tok["expiresAt"]<now_ts or not verify_password(d.get("code",""),tok["codeHash"]):return jsonify(error="Invalid or expired code"),400
  db().verification_tokens.update_one({"_id":tok["_id"]},{"$set":{"used":True}});db().users.update_one({"_id":u["_id"]},{"$set":{"emailVerified":True}});return jsonify(message="Email verified")
+@app.get("/api/auth/registration-status")
+def registration_status():
+ enabled = db().settings.find_one({"key":"registration_enabled"})
+ return jsonify(enabled=True if enabled is None else bool(enabled.get("value", True)))
+
 @app.post("/api/auth/login")
 def login():
  d=request.get_json() or {};u=db().users.find_one({"email":d.get("email","").strip().lower()})
@@ -61,6 +68,15 @@ def me():
  u=auth()
  if not u:return jsonify(error="Unauthorized"),401
  return jsonify(id=str(u["_id"]),email=u["email"],role=u["role"],emailVerified=u.get("emailVerified",False))
+@app.post("/api/admin/registration")
+def registration_toggle():
+ u=admin()
+ if not u:return jsonify(error="Unauthorized"),403
+ d=request.get_json() or {}; enabled=bool(d.get("enabled",True))
+ db().settings.update_one({"key":"registration_enabled"},{"$set":{"key":"registration_enabled","value":enabled,"updatedAt":datetime.now(timezone.utc),"updatedBy":u["_id"]}},upsert=True)
+ audit(db(),str(u["_id"]),"TOGGLE_REGISTRATION",meta={"enabled":enabled})
+ return jsonify(enabled=enabled,message="Client registration " + ("enabled" if enabled else "disabled"))
+
 @app.post("/api/admin/subscription")
 def subscription():
  u=admin()
