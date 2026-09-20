@@ -59,7 +59,9 @@ def login():
  d=request.get_json() or {};u=db().users.find_one({"email":d.get("email","").strip().lower()})
  if not u or not verify_password(d.get("password",""),u["passwordHash"]):return jsonify(error="Invalid credentials"),401
  if str(u.get("role","")).upper()!="ADMIN" and not u.get("emailVerified"):return jsonify(error="Email verification required"),403
- r=make_response(jsonify(ok=True,role="admin" if str(u.get("role","")).upper()=="ADMIN" else "client",redirectPath=("/"+app.config["ADMIN_PATH"].strip("/") if str(u.get("role","")).upper()=="ADMIN" else "/dashboard")));r.set_cookie(app.config["COOKIE_NAME"],token_for(u),httponly=True,secure=app.config["COOKIE_SECURE"],samesite="Lax",max_age=43200,path="/",domain=app.config.get("COOKIE_DOMAIN"));return r
+ r=make_response(jsonify(ok=True,role="admin" if str(u.get("role","")).upper()=="ADMIN" else "client",redirectPath=("/"+app.config["ADMIN_PATH"].strip("/") if str(u.get("role","")).upper()=="ADMIN" else "/dashboard")));r.set_cookie(app.config["COOKIE_NAME"],token_for(u),httponly=True,secure=app.config["COOKIE_SECURE"],samesite="Lax",max_age=43200,path="/");return r
+# Use a host-only session cookie so the browser sends it to the deployed Vercel host.
+# COOKIE_DOMAIN remains available in environment/config for compatibility, but is not forced onto the cookie.
 @app.post("/api/auth/logout")
 def logout():
  r=make_response(jsonify(ok=True));r.delete_cookie(app.config["COOKIE_NAME"],path="/");return r
