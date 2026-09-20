@@ -1,3 +1,4 @@
+import json
 from flask import Flask,jsonify,request,make_response
 from datetime import datetime,timezone
 from bson import ObjectId
@@ -123,12 +124,68 @@ def ai_test():
  u=admin()
  if not u:return jsonify(error="Unauthorized"),403
  d=request.get_json() or {}
+ prompt=(d.get("prompt") or "").strip()
+ database=db()
+ # Build a sanitized, read-only snapshot from the same MongoDB data shown in the
+ # Control Center. Secrets, passwords, access tokens and private keys are never
+ # included in the AI context. External deployment/capacity telemetry is not
+ # claimed unless it is actually available in the application database.
+ businesses=list(database.businesses.find({}, {"businessName":1,"status":1,"createdAt":1}).sort("createdAt",-1).limit(100))
+ status_counts={}
+ for b in businesses:
+  st=b.get("status","PENDING");status_counts[st]=status_counts.get(st,0)+1
+ now=datetime.now(timezone.utc)
+ def count(coll, query=None):
+  return database[coll].count_documents(query or {}) if coll in database.list_collection_names() else 0
+ registration_doc=database.settings.find_one({"key":"registration_enabled"})
+ registration_enabled=bool(registration_doc.get("value",True)) if registration_doc else True
+ audit_rows=list(database.audit_logs.find({}, {"action":1,"target":1,"createdAt":1,"meta":1}).sort("createdAt",-1).limit(25))
+ recent=[]
+ for x in audit_rows:
+  recent.append({"action":x.get("action"),"target":x.get("target",""),"createdAt":x.get("createdAt").isoformat() if x.get("createdAt") else None})
+ subs_active=count("subscriptions", {"status":"ACTIVE"})
+ subs_pending=count("subscriptions", {"status":"PENDING"})
+ subs_cancelled=count("subscriptions", {"status":"CANCELLED"})
+ failed_payments=count("payments", {"status":{"$in":["FAILED","ERROR"]}})
+ pending_payments=count("payments", {"status":"PENDING"})
+ whatsapp_connected=count("whatsapp_integrations", {"active":True})
+ whatsapp_automation=count("whatsapp_integrations", {"automationEnabled":True})
+ whatsapp_webhook_unverified=count("whatsapp_integrations", {"active":True,"webhookVerified":False})
+ ai_enabled=count("ai_credentials", {"active":True})
+ docs_pending=count("documents", {"approved":False})
+ docs_total=count("documents")
+ users_total=count("users")
+ clients_total=count("users", {"role":{"$ne":"ADMIN"}})
+ failed_logins=count("audit_logs", {"action":"USER_LOGIN_FAILED"})
+ failed_ai=count("audit_logs", {"action":"ADMIN_AI_FAILED"})
+ context={
+  "generatedAt":now.isoformat(),
+  "adminEmail":u.get("email"),
+  "users":{"total":users_total,"nonAdmin":clients_total},
+  "businesses":{"total":len(businesses),"byStatus":status_counts},
+  "registration":{"enabled":registration_enabled},
+  "documents":{"total":docs_total,"pendingApproval":docs_pending},
+  "subscriptions":{"active":subs_active,"pending":subs_pending,"cancelled":subs_cancelled},
+  "payments":{"failed":failed_payments,"pending":pending_payments},
+  "whatsapp":{"connected":whatsapp_connected,"automationEnabled":whatsapp_automation,"webhookUnverified":whatsapp_webhook_unverified},
+  "ai":{"enabled":ai_enabled,"adminAIFailures":failed_ai},
+  "security":{"failedLogins":failed_logins},
+  "recentAuditEvents":recent,
+  "availableTelemetry":["MongoDB application data","Control Center metrics","audit logs"],
+  "unavailableTelemetry":["Vercel deployment status","infrastructure capacity","external job queues"]
+ }
+ system_prompt="""You are the administrative assistant inside a WhatsApp Business Automation SaaS Control Center. You DO have read-only access to the sanitized application snapshot supplied below. Never say you lack access to the administration dashboard when the snapshot contains the requested information. Use only the supplied data for factual claims. If a requested metric is not present, say it is not available rather than inventing it. Distinguish current application data from recommendations. Do not reveal secrets, credentials, tokens, passwords, private keys, or encrypted values. For data-changing actions, propose the action and require explicit administrator confirmation; do not claim that an action was executed. For deployment, infrastructure capacity, or external job status, state that this application snapshot does not provide that telemetry. Give a concise operational summary with: overall status, active issues/alerts supported by the data, affected components, recent changes/events, security concerns, and safe next steps.
+
+SANITIZED CONTROL CENTER SNAPSHOT:
+""" + json.dumps(context, default=str)
+ user_prompt=prompt or "Summarize the current administration dashboard and identify safe operational next actions."
  try:
-  out=openai_admin(d.get("prompt",""))
+  out=openai_admin(system_prompt + "\n\nADMIN REQUEST:\n" + user_prompt)
  except Exception as e:
-  audit(db(),str(u["_id"]),"ADMIN_AI_FAILED",meta={"promptLength":len(d.get("prompt","")),"errorType":type(e).__name__})
+  audit(database,str(u["_id"]),"ADMIN_AI_FAILED",meta={"promptLength":len(user_prompt),"errorType":type(e).__name__})
   return jsonify(error="Admin AI is not configured or is temporarily unavailable"),503
- audit(db(),str(u["_id"]),"ADMIN_AI",meta={"promptLength":len(d.get("prompt",""))});return jsonify(message=out)
+ audit(database,str(u["_id"]),"ADMIN_AI",meta={"promptLength":len(user_prompt),"contextGenerated":True})
+ return jsonify(message=out,context=context)
 @app.post("/api/admin/backup")
 def backup():
  u=admin()

@@ -7,8 +7,8 @@ export type ThemeMode = "system" | "mac" | "normal";
 export function ThemeControl(){
   const [mode,setMode]=useState<ThemeMode>("system");
   useEffect(()=>{
-    const saved=(localStorage.getItem("fluent-theme") as ThemeMode) || "system";
-    const next=(saved==="mac"||saved==="normal"||saved==="system")?saved:"system";
+    const raw=localStorage.getItem("fluent-theme");
+    const next: ThemeMode = raw === "mac" || raw === "normal" || raw === "system" ? raw : "system";
     setMode(next); applyTheme(next);
   },[]);
   function applyTheme(next:ThemeMode){
