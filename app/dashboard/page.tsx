@@ -1,7 +1,7 @@
 "use client";
 import {useEffect,useState} from "react";
 import {Bot,CheckCircle2,ChevronRight,FileText,LayoutDashboard,LogOut,MessageSquare,Users,WalletCards,ReceiptText,Settings,ShieldCheck,Activity,CreditCard,Tags,Upload,Download,Clock3, Zap, Smartphone, Search} from "lucide-react";
-import {ThemeControl,MobileMenu,StatusPill} from "../components";
+import {ThemeControl,MobileMenu,StatusPill,CoverageIndex} from "../components";
 
 const sections=[
  {id:"overview",label:"Overview",icon:LayoutDashboard},
@@ -41,5 +41,14 @@ export default function Dashboard(){
  {active==="reports"&&<section className="mt-5 fluent-card section-card"><div className="section-title">Reports & exports</div><div className="menu-grid mt-4">{["Customers","Transactions","Invoices","Subscriptions","Activity logs","WhatsApp activity","AI usage","Daily report","Weekly report","Monthly report","Google Sheets backup"].map(x=><div className="fluent-card menu-card" key={x}><div className="menu-icon"><FileText size={16}/></div><h3>{x}</h3><p>Operational report and export.</p></div>)}</div></section>}
  {active==="settings"&&<section className="mt-5 grid gap-4 lg:grid-cols-2"><div className="fluent-card section-card"><div className="section-title">Account settings</div><div className="activity-list mt-3">{["Change password","Reset password","Business information","Account status","Email verification","Secure sessions"].map(x=><div className="activity-row" key={x}><span>{x}</span><button className="fluent-button">Manage</button></div>)}</div></div><div className="fluent-card section-card"><div className="section-title">Appearance</div><p className="section-subtitle">System follows your device preference. Mac gives the workspace a macOS-style surface. Normal uses the standard Fluent enterprise appearance.</p><div className="mt-4"><ThemeControl/></div></div></section>}
  {active==="activity"&&<section className="mt-5 fluent-card section-card"><div className="section-title">Account audit history</div><div className="activity-list mt-4">{activity.map((x:any)=><div className="activity-row" key={x.createdAt+x.action}><div><strong>{x.action}</strong><div className="text-xs text-gray-500">{x.createdAt?new Date(x.createdAt).toLocaleString():""} {x.target?` · ${x.target}`:""}</div></div><StatusPill tone="success">Recorded</StatusPill></div>)}{!activity.length&&<div className="text-sm text-gray-500">No activity recorded.</div>}</div></section>}
- </main></div></div>
+ <CoverageIndex title="Complete client activity coverage" groups={[
+{name:"Account",items:["Register account","Verify email with OTP","Login","Logout","Change password","Reset password","View and update profile","Update business information","View account status","View subscription","View invoices","View receipts","Download documents","View account activity / audit history"]},
+{name:"WhatsApp",items:["Connect WhatsApp Business account","Configure WABA","Connect phone number","Store credentials securely","Verify webhook","Receive incoming messages","Send messages","Automated replies","Template messages","Welcome messages","Away messages","Business-hours responses","Keyword triggers","Customer journeys","View/search conversations","Message history","Message status tracking","Webhook events","Enable / disable automation"]},
+{name:"CRM",items:["Create, edit, delete and view customers","Search customers","Import customers","Export customers","Add/remove tags","Add notes","Conversation history","Record interactions","Segment customers","Customer groups","Bulk messaging"]},
+{name:"AI",items:["Configure client AI","Add encrypted OpenAI key","Test AI connection","Select model","System instructions","Business knowledge","Response tone and length","Enable / disable AI replies","Generate responses","Summarize conversations","Extract customer information","Classify requests","Escalate to humans","View usage","Monitor errors"]},
+{name:"Payments / M-Pesa",items:["Configure Daraja","Till / shortcode","Callback URL","Initiate payment","Receive and verify callback","Record transaction","Match customer / invoice","Generate receipt","Transaction history","Search / export transactions","Handle failed and pending payments"]},
+{name:"Subscriptions",items:["View plans","Subscribe","Change plan","Renew","Cancel","View status and expiry","Track usage limits","Track WhatsApp and AI usage","Track payment status","Generate invoice and receipt"]},
+{name:"Invoices / Documents",items:["Create / edit / view invoice","Download or email invoice","Mark invoice paid","Generate / download / email receipt","View approved documents","View document history"]},
+{name:"Reports / Settings",items:["Customer, payment, invoice and usage reports","Daily / weekly / monthly reports","Secure sessions","Email verification","Account settings"]}
+]}/> </main></div></div>
 }
