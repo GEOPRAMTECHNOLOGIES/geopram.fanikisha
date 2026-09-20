@@ -24,5 +24,3 @@ def openai_admin(prompt):
  return OpenAI(api_key=key).responses.create(model=current_app.config["OPENAI_ADMIN_MODEL"],input=prompt).output_text
 def whatsapp_send(integration,to,text):
  token=decrypt_secret(integration["accessToken"]);r=requests.post(f"https://graph.facebook.com/v23.0/{integration['phoneNumberId']}/messages",headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"},json={"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":text}},timeout=20);r.raise_for_status();return r.json()
-
-# Project integration marker: complete admin-role + registration build

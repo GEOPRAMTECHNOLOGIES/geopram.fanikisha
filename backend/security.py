@@ -16,5 +16,3 @@ def encrypt_secret(v):
  key=base64.urlsafe_b64decode(current_app.config["ENCRYPTION_KEY"]); n=os.urandom(12); c=AESGCM(key).encrypt(n,v.encode(),None); return base64.urlsafe_b64encode(n+c).decode()
 def decrypt_secret(v):
  key=base64.urlsafe_b64decode(current_app.config["ENCRYPTION_KEY"]); r=base64.urlsafe_b64decode(v.encode()); return AESGCM(key).decrypt(r[:12],r[12:],None).decode()
-
-# Project integration marker: complete admin-role + registration build

@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { jwtVerify } from "jose";
 
 function adminPath() {
   return (process.env.ADMIN_PATH || "admin").replace(/^\/+|\/+$/g, "");
@@ -7,12 +6,19 @@ function adminPath() {
 
 async function isAdmin(req: NextRequest) {
   const token = req.cookies.get(process.env.COOKIE_NAME || "fluent_session")?.value;
-  const secret = process.env.SESSION_SECRET;
-  if (!token || !secret) return false;
+  if (!token) return false;
+
+  // The database is the authority for the ADMIN role. The backend endpoint
+  // verifies the current session against MongoDB instead of trusting a
+  // potentially stale role claim in the JWT.
   try {
-    const key = new TextEncoder().encode(secret);
-    const { payload } = await jwtVerify(token, key, { algorithms: ["HS256"] });
-    return payload.role === "ADMIN";
+    const checkUrl = new URL("/api/admin/overview", req.url);
+    const response = await fetch(checkUrl, {
+      method: "GET",
+      headers: { cookie: `${process.env.COOKIE_NAME || "fluent_session"}=${token}` },
+      cache: "no-store",
+    });
+    return response.ok;
   } catch {
     return false;
   }
@@ -42,5 +48,3 @@ export async function middleware(req: NextRequest) {
 export const config = {
   matcher: ["/:path*"],
 };
-
-<!-- Project integration marker: complete admin-role + registration build -->

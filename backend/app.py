@@ -15,7 +15,6 @@ def auth():
  if not t:return None
  return db().users.find_one({"_id":oid(t["sub"])})
 def admin():
- # Authorization source of truth: the current MongoDB user document role.
  u=auth();return u if u and str(u.get("role","")).upper()=="ADMIN" else None
 @app.get("/api/health")
 def health():
@@ -52,8 +51,8 @@ def verify_email():
  db().verification_tokens.update_one({"_id":tok["_id"]},{"$set":{"used":True}});db().users.update_one({"_id":u["_id"]},{"$set":{"emailVerified":True}});return jsonify(message="Email verified")
 @app.get("/api/auth/registration-status")
 def registration_status():
- enabled=db().settings.find_one({"key":"registration_enabled"})
- return jsonify(enabled=True if enabled is None else bool(enabled.get("value",True)))
+ enabled = db().settings.find_one({"key":"registration_enabled"})
+ return jsonify(enabled=True if enabled is None else bool(enabled.get("value", True)))
 
 @app.post("/api/auth/login")
 def login():
@@ -73,10 +72,10 @@ def me():
 def registration_toggle():
  u=admin()
  if not u:return jsonify(error="Unauthorized"),403
- d=request.get_json() or {};enabled=bool(d.get("enabled",True))
+ d=request.get_json() or {}; enabled=bool(d.get("enabled",True))
  db().settings.update_one({"key":"registration_enabled"},{"$set":{"key":"registration_enabled","value":enabled,"updatedAt":datetime.now(timezone.utc),"updatedBy":u["_id"]}},upsert=True)
  audit(db(),str(u["_id"]),"TOGGLE_REGISTRATION",meta={"enabled":enabled})
- return jsonify(enabled=enabled,message="Client registration "+("enabled" if enabled else "disabled"))
+ return jsonify(enabled=enabled,message="Client registration " + ("enabled" if enabled else "disabled"))
 
 @app.post("/api/admin/subscription")
 def subscription():
@@ -152,7 +151,7 @@ def send_document():
 def pdf(docid):
  u=auth();x=db().documents.find_one({"_id":oid(docid)}) if u else None
  if not x:return jsonify(error="Not found"),404
- if str(u.get("role","")).upper()!="ADMIN" and not x.get("approved"):return jsonify(error="Not found"),404
+ if u.get("role")!="ADMIN" and not x.get("approved"):return jsonify(error="Not found"),404
  r=make_response(document_pdf(x));r.headers["Content-Type"]="application/pdf";r.headers["Content-Disposition"]=f'inline; filename="{x["number"]}.pdf"';return r
 @app.get("/api/webhooks/whatsapp")
 def wa_verify():
@@ -164,5 +163,3 @@ def wa_webhook():return jsonify(received=True)
 @app.post("/api/webhooks/daraja")
 def daraja_callback():
  payload=request.get_json(silent=True) or {};db().daraja_callbacks.insert_one({"payload":payload,"createdAt":datetime.now(timezone.utc)});return jsonify(ResultCode=0,ResultDesc="Accepted")
-
-# Project integration marker: complete admin-role + registration build

@@ -66,5 +66,3 @@ For the admin account, the existing user document must contain:
 ```
 
 Do not put a plaintext password in MongoDB.
-
-<!-- Project integration marker: complete admin-role + registration build -->
