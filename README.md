@@ -1,86 +1,41 @@
 # Fluent Business Automation SaaS
 
-Next.js + TypeScript + Tailwind frontend, Flask/Python backend, MongoDB Atlas, secure admin console, encrypted client AI keys, invoices/receipts, SMTP, WhatsApp webhook, Daraja environment configuration, optional Redis and Google Sheets hooks.
+A MongoDB-backed WhatsApp Business Automation SaaS with separate client and administrator workspaces.
 
-## Security model
-- Platform secrets stay in Vercel environment variables.
-- Client AI keys are encrypted with AES-256-GCM before MongoDB storage.
-- Raw secrets are never returned to the browser.
-- Admin authorization is enforced by MongoDB `role=ADMIN`; `ADMIN_PATH` is only a routing layer.
-- Cookies are HttpOnly/Secure in production.
-- Documents require admin approval before client visibility.
-- Admin actions are audited.
-- Daraja credentials are never stored in MongoDB.
+## Implemented system
 
-## Deploy
-1. Create a MongoDB Atlas project and database user. Set `DATABASE_NAME=whatsapp_saas`. You do not need to manually create a database in Atlas; the deployment creates the application collections on startup.
-2. Copy `.env.example` and generate `SESSION_SECRET` and `ENCRYPTION_KEY`.
-3. Seed first admin with `scripts/create_admin.py`.
-4. Set Vercel Production environment variables.
-5. Mark production secrets Sensitive in Vercel.
-6. Deploy and redeploy after env changes.
+- Client registration, email OTP verification, login/logout and password change.
+- MongoDB-backed account and business profiles.
+- WhatsApp Business connection with encrypted access-token storage.
+- WhatsApp outbound messaging through the configured Graph API.
+- WhatsApp webhook verification/ingestion and normalized inbound messages.
+- Keyword automation rules that can automatically reply to incoming messages.
+- Customer/CRM CRUD with tags and notes.
+- Client AI configuration with encrypted OpenAI credentials and response generation.
+- M-Pesa payment recording and Daraja STK Push/callback workflow when the existing environment is configured.
+- Subscription plans and client subscriptions.
+- Invoice, receipt and document records.
+- Operational reports and CSV exports.
+- Email delivery for verification and document sending using existing SMTP configuration.
+- Administrator Control Center with live MongoDB data.
+- MongoDB-authoritative ADMIN role enforcement on every admin API.
+- Client status and role administration.
+- Registration enable/disable control.
+- WhatsApp and AI administration without exposing secrets.
+- Payment verification and audit trail.
+- Google Sheets backup hook using the existing server-side environment credentials.
+- Live Admin AI context built from sanitized current database metrics.
+- Comprehensive audit logging for security-sensitive actions.
+- System/Mac/Normal appearance modes and responsive layouts.
 
-Vercel supports Flask through the Python runtime; `api/index.py` imports the Flask application.
+## Security
 
-## Important production follow-ups
-This scaffold is the core system, not a claim that every external provider is already live-configured. Before public launch, add/enable: email OTP verification and password reset, Redis rate limiting/queues, WhatsApp signature validation, exact Daraja API flow approved for your production app, idempotent payment callbacks, background jobs, monitoring, automated tests, and Google Sheets export if desired.
+The hidden administrator path is not the security boundary. Administrative APIs query the current MongoDB user and require `role=ADMIN`. Passwords, session secrets, access tokens and API keys are not returned to browser clients or written into audit metadata.
 
-Do not put any real API keys in source control or in chat.
+## Environment
 
-## Admin login and database role
+The existing `.env.example` was intentionally left unchanged. No new environment variables were introduced by this build.
 
-There is no hard-coded administrator account. Create a normal account or insert/update a user in MongoDB, then set that user's `role` field to exactly `ADMIN` and `emailVerified` to `true`. The login endpoint checks the database user record, and the configured `ADMIN_PATH` is protected by a signed session cookie. Direct access to `/admin-ui` or `__ADMIN__` is also blocked unless the session has the `ADMIN` role.
+## Deployment
 
-Example MongoDB update (replace the email):
-
-```javascript
-db.users.updateOne(
-  { email: "admin@example.com" },
-  { $set: { role: "ADMIN", emailVerified: true } }
-)
-```
-
-The password must still be created using the included `scripts/create_admin.py` or through the application's password registration flow; do not put a plaintext password into MongoDB.
-
-Set `ADMIN_PATH` in Vercel, for example:
-
-```env
-ADMIN_PATH=control-center-a8K4mQ72
-```
-
-Then an authenticated ADMIN reaches `/control-center-a8K4mQ72`. A client account, even if it knows the URL, is redirected to login and cannot render the admin UI.
-
-
-## MongoDB visibility and login diagnostics
-
-The application database is **`whatsapp_saas`** unless `DATABASE_NAME` is changed in Vercel. The deployment explicitly creates these collections on startup: `users`, `businesses`, `documents`, `audit_logs`, `ai_credentials`, `verification_tokens`, `subscriptions`, and `daraja_callbacks`.
-
-After deployment, open `/api/health`. A healthy response includes the active database name, collection names, and user count. This is a safe diagnostic endpoint and does not expose MongoDB credentials.
-
-If login returns `401 Invalid credentials`, verify that the account exists in the **same Atlas cluster/database configured by `MONGODB_URI` and `DATABASE_NAME`**. If you registered an account before changing the database settings, that account may exist in a different database.
-
-For the admin account, the existing user document must contain:
-
-```javascript
-{ role: "ADMIN", emailVerified: true }
-```
-
-Do not put a plaintext password in MongoDB.
-
-## Dashboard activity architecture
-
-The dashboard now provides a responsive enterprise navigation model for client and administrator activities. Client areas cover WhatsApp, CRM/customers, AI, payments, subscriptions, documents, reports, settings and account audit history. The Control Center covers accounts, registration, WhatsApp, AI, subscriptions, payments, documents, reports, backups, audit logs, security and system settings.
-
-### Appearance modes
-
-The web UI supports three local appearance modes without adding environment variables:
-
-- **System** — follows the device light/dark preference.
-- **Mac** — macOS-inspired surfaces and controls.
-- **Normal** — standard Fluent/Microsoft 365-style enterprise UI.
-
-The selection is stored in browser local storage and is responsive across desktop, tablet and mobile layouts.
-
-### Security
-
-MongoDB remains authoritative for administrator authorization. The backend checks the current authenticated user's database document and requires `role=ADMIN` for administrator APIs. Client AI and WhatsApp credentials are encrypted before persistence and are never returned as plaintext by the dashboard. Audit metadata deliberately excludes secret values.
+Use the existing Vercel configuration and environment values. The Next.js frontend and Flask API are deployed together; `/api/*` is rewritten to `api/index.py`.
