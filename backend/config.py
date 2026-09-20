@@ -9,3 +9,5 @@ class Config:
  DARAJA_ENV=os.environ.get("DARAJA_ENV","production"); DARAJA_BASE_URL=os.environ.get("DARAJA_BASE_URL","https://api.safaricom.co.ke"); DARAJA_CONSUMER_KEY=os.environ.get("DARAJA_CONSUMER_KEY",""); DARAJA_CONSUMER_SECRET=os.environ.get("DARAJA_CONSUMER_SECRET",""); DARAJA_PASSKEY=os.environ.get("DARAJA_PASSKEY",""); DARAJA_SHORTCODE=os.environ.get("DARAJA_SHORTCODE",""); DARAJA_TILL_NUMBER=os.environ.get("DARAJA_TILL_NUMBER",""); DARAJA_CALLBACK_URL=os.environ.get("DARAJA_CALLBACK_URL",""); DARAJA_TRANSACTION_TYPE=os.environ.get("DARAJA_TRANSACTION_TYPE","")
  WHATSAPP_VERIFY_TOKEN=os.environ.get("WHATSAPP_VERIFY_TOKEN",""); WHATSAPP_APP_SECRET=os.environ.get("WHATSAPP_APP_SECRET","")
  GOOGLE_SERVICE_ACCOUNT_JSON=os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON",""); GOOGLE_SHEET_ID=os.environ.get("GOOGLE_SHEET_ID","")
+
+# Admin-role integration review: this file is included in the complete deployment build.

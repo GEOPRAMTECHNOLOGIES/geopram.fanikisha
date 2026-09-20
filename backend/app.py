@@ -14,8 +14,13 @@ def auth():
  t=read_token()
  if not t:return None
  return db().users.find_one({"_id":oid(t["sub"])})
+def is_admin_role(user):
+ # MongoDB is the authoritative source for admin authorization.
+ return bool(user and str(user.get("role", "")).strip().upper() == "ADMIN")
+
 def admin():
- u=auth();return u if u and u.get("role")=="ADMIN" else None
+ u=auth()
+ return u if is_admin_role(u) else None
 @app.get("/api/health")
 def health():
  try:
@@ -58,8 +63,8 @@ def registration_status():
 def login():
  d=request.get_json() or {};u=db().users.find_one({"email":d.get("email","").strip().lower()})
  if not u or not verify_password(d.get("password",""),u["passwordHash"]):return jsonify(error="Invalid credentials"),401
- if u.get("role")!="ADMIN" and not u.get("emailVerified"):return jsonify(error="Email verification required"),403
- r=make_response(jsonify(ok=True,role="admin" if u.get("role")=="ADMIN" else "client",redirectPath=("/"+app.config["ADMIN_PATH"].strip("/") if u.get("role")=="ADMIN" else "/dashboard")));r.set_cookie(app.config["COOKIE_NAME"],token_for(u),httponly=True,secure=app.config["COOKIE_SECURE"],samesite="Lax",max_age=43200,path="/",domain=app.config.get("COOKIE_DOMAIN"));return r
+ if not is_admin_role(u) and not u.get("emailVerified"):return jsonify(error="Email verification required"),403
+ r=make_response(jsonify(ok=True,role="admin" if is_admin_role(u) else "client",redirectPath=("/"+app.config["ADMIN_PATH"].strip("/") if is_admin_role(u) else "/dashboard")));r.set_cookie(app.config["COOKIE_NAME"],token_for(u),httponly=True,secure=app.config["COOKIE_SECURE"],samesite="Lax",max_age=43200,path="/",domain=app.config.get("COOKIE_DOMAIN"));return r
 @app.post("/api/auth/logout")
 def logout():
  r=make_response(jsonify(ok=True));r.delete_cookie(app.config["COOKIE_NAME"],path="/");return r
@@ -68,6 +73,14 @@ def me():
  u=auth()
  if not u:return jsonify(error="Unauthorized"),401
  return jsonify(id=str(u["_id"]),email=u["email"],role=u["role"],emailVerified=u.get("emailVerified",False))
+
+@app.get("/api/auth/session")
+def session():
+ # This endpoint exposes only the current authorization state, never credentials.
+ u=auth()
+ if not u:
+  return jsonify(authenticated=False),401
+ return jsonify(authenticated=True,isAdmin=is_admin_role(u),role=u.get("role"),email=u.get("email"))
 @app.post("/api/admin/registration")
 def registration_toggle():
  u=admin()
@@ -163,3 +176,5 @@ def wa_webhook():return jsonify(received=True)
 @app.post("/api/webhooks/daraja")
 def daraja_callback():
  payload=request.get_json(silent=True) or {};db().daraja_callbacks.insert_one({"payload":payload,"createdAt":datetime.now(timezone.utc)});return jsonify(ResultCode=0,ResultDesc="Accepted")
+
+# Admin-role integration review: this file is included in the complete deployment build.

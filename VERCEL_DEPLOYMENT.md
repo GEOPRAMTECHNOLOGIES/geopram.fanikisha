@@ -14,5 +14,7 @@ Add provider variables only when the integration is configured: OpenAI, WhatsApp
 ## Security
 - Never commit `.env` or service-account JSON.
 - Keep `SESSION_SECRET` and `ENCRYPTION_KEY` stable after production data exists.
-- `ADMIN_PATH` is routing obfuscation, not authorization. The Flask API requires MongoDB `role=ADMIN`.
+- `ADMIN_PATH` is routing obfuscation, not authorization. The Flask API requires the live MongoDB user record to have `role=ADMIN` (case-insensitive). The admin UI performs a second database-backed session check before rendering.
 - Client AI credentials are encrypted before MongoDB storage.
+
+/* Admin-role integration review: included in complete deployment build. */

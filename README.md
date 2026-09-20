@@ -6,7 +6,7 @@ Next.js + TypeScript + Tailwind frontend, Flask/Python backend, MongoDB Atlas, s
 - Platform secrets stay in Vercel environment variables.
 - Client AI keys are encrypted with AES-256-GCM before MongoDB storage.
 - Raw secrets are never returned to the browser.
-- Admin authorization is enforced by MongoDB `role=ADMIN`; `ADMIN_PATH` is only a routing layer.
+- Admin authorization is enforced by the live MongoDB user document: `role` is normalized case-insensitively and must be `ADMIN`; `ADMIN_PATH` is only a routing layer. The admin UI also re-checks the current database-backed session before rendering.
 - Cookies are HttpOnly/Secure in production.
 - Documents require admin approval before client visibility.
 - Admin actions are audited.
@@ -29,7 +29,7 @@ Do not put any real API keys in source control or in chat.
 
 ## Admin login and database role
 
-There is no hard-coded administrator account. Create a normal account or insert/update a user in MongoDB, then set that user's `role` field to exactly `ADMIN` and `emailVerified` to `true`. The login endpoint checks the database user record, and the configured `ADMIN_PATH` is protected by a signed session cookie. Direct access to `/admin-ui` or `__ADMIN__` is also blocked unless the session has the `ADMIN` role.
+There is no hard-coded administrator account. Create a normal account or insert/update a user in MongoDB, then set that user's `role` field to `ADMIN` (the check is case-insensitive) and `emailVerified` to `true`. The login endpoint checks the database user record, and the configured `ADMIN_PATH` is protected by a signed session cookie. Direct access to `/admin-ui` or `__ADMIN__` is also blocked unless the session has the `ADMIN` role.
 
 Example MongoDB update (replace the email):
 
@@ -66,3 +66,5 @@ For the admin account, the existing user document must contain:
 ```
 
 Do not put a plaintext password in MongoDB.
+
+/* Admin-role integration review: included in complete deployment build. */

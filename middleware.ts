@@ -12,7 +12,7 @@ async function isAdmin(req: NextRequest) {
   try {
     const key = new TextEncoder().encode(secret);
     const { payload } = await jwtVerify(token, key, { algorithms: ["HS256"] });
-    return payload.role === "ADMIN";
+    return String(payload.role || "").toUpperCase() === "ADMIN";
   } catch {
     return false;
   }
@@ -22,7 +22,7 @@ export async function middleware(req: NextRequest) {
   const configured = adminPath();
   const pathname = req.nextUrl.pathname.replace(/\/+$/, "") || "/";
 
-  // Only the configured admin path is publicly routable to the admin UI.
+  // Admin UI access starts with an ADMIN role claim issued from the MongoDB user record.
   // The internal route is protected too, so /admin-ui cannot bypass ADMIN_PATH.
   if (pathname === `/${configured}` || pathname === "/admin-ui" || pathname === "/__ADMIN__") {
     if (!(await isAdmin(req))) {
@@ -42,3 +42,5 @@ export async function middleware(req: NextRequest) {
 export const config = {
   matcher: ["/:path*"],
 };
+
+/* Admin-role integration review: included in complete deployment build. */

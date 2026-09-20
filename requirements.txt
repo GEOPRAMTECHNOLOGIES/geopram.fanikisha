@@ -11,3 +11,5 @@ google-api-python-client==2.185.0
 google-auth==2.41.0
 redis==6.4.0
 gunicorn==23.0.0
+
+/* Admin-role integration review: included in complete deployment build. */

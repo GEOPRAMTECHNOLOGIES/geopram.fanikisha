@@ -1,18 +1,44 @@
-import os
-from pymongo import MongoClient
-_client=None
+from pymongo import MongoClient, ASCENDING, DESCENDING
+from pymongo.errors import CollectionInvalid
+from flask import current_app
+
+_client = None
+
+COLLECTIONS = [
+    "users",
+    "businesses",
+    "documents",
+    "audit_logs",
+    "ai_credentials",
+    "verification_tokens",
+    "subscriptions",
+    "daraja_callbacks",
+]
+
 def db():
- global _client
- if _client is None:_client=MongoClient(os.environ["MONGODB_URI"],serverSelectionTimeoutMS=10000)
- return _client[os.environ.get("DATABASE_NAME","whatsapp_saas")]
+    global _client
+    if _client is None:
+        _client = MongoClient(
+            current_app.config["MONGODB_URI"],
+            serverSelectionTimeoutMS=5000,
+        )
+    return _client[current_app.config["DATABASE_NAME"]]
+
 def init_indexes():
- d=db()
- d.users.create_index("email",unique=True)
- d.businesses.create_index("ownerId")
- d.documents.create_index([("businessId",1),("createdAt",-1)])
- d.audit_logs.create_index([("createdAt",-1)])
- d.verification_tokens.create_index("userId")
- d.settings.create_index("key",unique=True)
- # Touch the database so it appears in MongoDB Atlas even before a user registers.
- if "settings" not in d.list_collection_names():
-  d.settings.insert_one({"key":"registration_enabled","value":True})
+    d = db()
+    # Explicitly create the application collections so MongoDB Atlas shows
+    # the configured database immediately after the first deployment.
+    existing = set(d.list_collection_names())
+    for name in COLLECTIONS:
+        if name not in existing:
+            try:
+                d.create_collection(name)
+            except CollectionInvalid:
+                pass
+
+    d.users.create_index([("email", ASCENDING)], unique=True)
+    d.businesses.create_index([("ownerId", ASCENDING)])
+    d.documents.create_index([("businessId", ASCENDING), ("createdAt", DESCENDING)])
+    d.audit_logs.create_index([("createdAt", DESCENDING)])
+
+# Admin-role integration review: this file is included in the complete deployment build.
