@@ -1,0 +1,1 @@
+export default function InvoicePreview({invoice}:{invoice:any}){return <article className="fluent-card section-card"><h2>{invoice?.title||"Invoice"}</h2><p>{invoice?.number}</p><strong>{invoice?.currency} {invoice?.amount}</strong></article>}

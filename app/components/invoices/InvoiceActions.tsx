@@ -1,0 +1,1 @@
+"use client";export default function InvoiceActions({id}:{id:string}){return <div className="flex gap-2"><a className="fluent-button" href={`/api/client/invoices/${id}/pdf`}>Download PDF</a><button className="fluent-button" onClick={()=>navigator.clipboard?.writeText(location.origin+`/api/client/invoices/${id}`)}>Copy</button></div>}

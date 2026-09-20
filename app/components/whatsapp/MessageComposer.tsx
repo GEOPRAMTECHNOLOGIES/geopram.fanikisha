@@ -1,0 +1,1 @@
+"use client";import {useState} from "react";export default function MessageComposer(){const [text,setText]=useState("");return <div><textarea className="fluent-input" value={text} onChange={e=>setText(e.target.value)}/><button className="fluent-primary mt-2">Send</button></div>}

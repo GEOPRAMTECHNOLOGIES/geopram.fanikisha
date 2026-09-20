@@ -1,0 +1,1 @@
+export default function PaymentsPage(){return <main className="content-wrap"><h1 className="text-2xl font-semibold">Payments</h1><div className="notice mt-4">M-Pesa STK payments and invoice payment links are handled by the payment API.</div></main>}

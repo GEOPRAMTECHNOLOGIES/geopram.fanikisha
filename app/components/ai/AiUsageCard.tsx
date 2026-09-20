@@ -1,0 +1,1 @@
+export default function AiUsageCard({usage}:{usage:number}){return <div className="metric-card fluent-card"><div className="metric-label">AI usage</div><div className="metric-value">{usage}</div></div>}

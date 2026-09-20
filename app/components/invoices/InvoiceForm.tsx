@@ -1,0 +1,1 @@
+"use client";import {useState} from "react";export default function InvoiceForm(){const [amount,setAmount]=useState("");return <form className="space-y-3"><input className="fluent-input" placeholder="Amount" value={amount} onChange={e=>setAmount(e.target.value)}/><button className="fluent-primary">Create invoice</button></form>}

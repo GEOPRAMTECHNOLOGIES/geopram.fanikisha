@@ -1,0 +1,1 @@
+export async function api<T=any>(path:string,options:RequestInit={}){const r=await fetch(path,{...options,cache:"no-store"});const x=await r.json().catch(()=>({}));if(!r.ok)throw new Error(x.error||"Request failed");return x as T}

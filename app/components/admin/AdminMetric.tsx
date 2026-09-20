@@ -1,0 +1,1 @@
+export default function AdminMetric({title,value}:{title:string;value:any}){return <div className="fluent-card metric-card"><div className="metric-label">{title}</div><div className="metric-value">{String(value)}</div></div>}
