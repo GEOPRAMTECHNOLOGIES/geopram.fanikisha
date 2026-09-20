@@ -66,3 +66,21 @@ For the admin account, the existing user document must contain:
 ```
 
 Do not put a plaintext password in MongoDB.
+
+## Dashboard activity architecture
+
+The dashboard now provides a responsive enterprise navigation model for client and administrator activities. Client areas cover WhatsApp, CRM/customers, AI, payments, subscriptions, documents, reports, settings and account audit history. The Control Center covers accounts, registration, WhatsApp, AI, subscriptions, payments, documents, reports, backups, audit logs, security and system settings.
+
+### Appearance modes
+
+The web UI supports three local appearance modes without adding environment variables:
+
+- **System** — follows the device light/dark preference.
+- **Mac** — macOS-inspired surfaces and controls.
+- **Normal** — standard Fluent/Microsoft 365-style enterprise UI.
+
+The selection is stored in browser local storage and is responsive across desktop, tablet and mobile layouts.
+
+### Security
+
+MongoDB remains authoritative for administrator authorization. The backend checks the current authenticated user's database document and requires `role=ADMIN` for administrator APIs. Client AI and WhatsApp credentials are encrypted before persistence and are never returned as plaintext by the dashboard. Audit metadata deliberately excludes secret values.

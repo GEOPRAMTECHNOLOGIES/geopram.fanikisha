@@ -59,11 +59,14 @@ def login():
  d=request.get_json() or {};u=db().users.find_one({"email":d.get("email","").strip().lower()})
  if not u or not verify_password(d.get("password",""),u["passwordHash"]):return jsonify(error="Invalid credentials"),401
  if str(u.get("role","")).upper()!="ADMIN" and not u.get("emailVerified"):return jsonify(error="Email verification required"),403
+ audit(db(),str(u["_id"]),"ADMIN_LOGIN" if str(u.get("role","")).upper()=="ADMIN" else "USER_LOGIN",meta={"email":u.get("email")})
  r=make_response(jsonify(ok=True,role="admin" if str(u.get("role","")).upper()=="ADMIN" else "client",redirectPath=("/"+app.config["ADMIN_PATH"].strip("/") if str(u.get("role","")).upper()=="ADMIN" else "/dashboard")));r.set_cookie(app.config["COOKIE_NAME"],token_for(u),httponly=True,secure=app.config["COOKIE_SECURE"],samesite="Lax",max_age=43200,path="/");return r
 # Use a host-only session cookie so the browser sends it to the deployed Vercel host.
 # COOKIE_DOMAIN remains available in environment/config for compatibility, but is not forced onto the cookie.
 @app.post("/api/auth/logout")
 def logout():
+ u=auth()
+ if u:audit(db(),str(u["_id"]),"USER_LOGOUT")
  r=make_response(jsonify(ok=True));r.delete_cookie(app.config["COOKIE_NAME"],path="/");return r
 @app.get("/api/me")
 def me():
@@ -119,7 +122,13 @@ def client_ai():
 def ai_test():
  u=admin()
  if not u:return jsonify(error="Unauthorized"),403
- d=request.get_json() or {};out=openai_admin(d.get("prompt",""));audit(db(),str(u["_id"]),"ADMIN_AI",meta={"promptLength":len(d.get("prompt",""))});return jsonify(message=out)
+ d=request.get_json() or {}
+ try:
+  out=openai_admin(d.get("prompt",""))
+ except Exception as e:
+  audit(db(),str(u["_id"]),"ADMIN_AI_FAILED",meta={"promptLength":len(d.get("prompt","")),"errorType":type(e).__name__})
+  return jsonify(error="Admin AI is not configured or is temporarily unavailable"),503
+ audit(db(),str(u["_id"]),"ADMIN_AI",meta={"promptLength":len(d.get("prompt",""))});return jsonify(message=out)
 @app.post("/api/admin/backup")
 def backup():
  u=admin()
@@ -155,12 +164,103 @@ def pdf(docid):
  if not x:return jsonify(error="Not found"),404
  if u.get("role")!="ADMIN" and not x.get("approved"):return jsonify(error="Not found"),404
  r=make_response(document_pdf(x));r.headers["Content-Type"]="application/pdf";r.headers["Content-Disposition"]=f'inline; filename="{x["number"]}.pdf"';return r
+
+@app.get("/api/client/profile")
+def client_profile():
+ u=auth()
+ if not u:return jsonify(error="Unauthorized"),401
+ b=db().businesses.find_one({"ownerId":u["_id"]})
+ if not b:return jsonify(profile={"email":u["email"],"emailVerified":bool(u.get("emailVerified"))})
+ sub=db().subscriptions.find_one({"businessId":b["_id"]})
+ return jsonify(profile={"id":str(u["_id"]),"email":u["email"],"emailVerified":bool(u.get("emailVerified")),"businessName":b.get("businessName"),"status":b.get("status","PENDING"),"subscription":sub and {"plan":sub.get("plan"),"status":sub.get("status"),"endsAt":sub.get("endsAt")}})
+
+@app.get("/api/client/activity")
+def client_activity():
+ u=auth()
+ if not u:return jsonify(error="Unauthorized"),401
+ rows=[]
+ for x in db().audit_logs.find({"actor":str(u["_id"])}, {"action":1,"target":1,"meta":1,"createdAt":1}).sort("createdAt",-1).limit(100):
+  rows.append({"action":x.get("action"),"target":x.get("target",""),"meta":x.get("meta",{}),"createdAt":x.get("createdAt").isoformat() if x.get("createdAt") else None})
+ return jsonify(activity=rows)
+
+@app.get("/api/client/whatsapp")
+def client_whatsapp():
+ u=auth()
+ if not u:return jsonify(error="Unauthorized"),401
+ b=db().businesses.find_one({"ownerId":u["_id"]})
+ if not b:return jsonify(connected=False)
+ x=db().whatsapp_integrations.find_one({"businessId":b["_id"],"active":True})
+ return jsonify(connected=bool(x),wabaId=x.get("wabaId") if x else None,phoneNumberId=x.get("phoneNumberId") if x else None,webhookVerified=bool(x.get("webhookVerified")) if x else False,automationEnabled=bool(x.get("automationEnabled")) if x else False)
+
+@app.post("/api/client/whatsapp")
+def save_client_whatsapp():
+ u=auth()
+ if not u:return jsonify(error="Unauthorized"),401
+ d=request.get_json() or {};b=db().businesses.find_one({"ownerId":u["_id"]})
+ if not b:return jsonify(error="Business not found"),404
+ token=d.get("accessToken","").strip();phone=d.get("phoneNumberId","").strip();waba=d.get("wabaId","").strip()
+ if not token or not phone:return jsonify(error="Phone Number ID and access token are required"),400
+ db().whatsapp_integrations.update_one({"businessId":b["_id"]},{"$set":{"businessId":b["_id"],"wabaId":waba,"phoneNumberId":phone,"accessToken":encrypt_secret(token),"active":True,"automationEnabled":bool(d.get("automationEnabled",True)),"webhookVerified":False,"updatedAt":datetime.now(timezone.utc)}},upsert=True)
+ audit(db(),str(u["_id"]),"WHATSAPP_CONNECTED",str(b["_id"]),{"phoneNumberId":phone})
+ return jsonify(message="WhatsApp connection saved securely",connected=True)
+
+@app.post("/api/client/whatsapp/automation")
+def client_whatsapp_automation():
+ u=auth()
+ if not u:return jsonify(error="Unauthorized"),401
+ b=db().businesses.find_one({"ownerId":u["_id"]});d=request.get_json() or {}
+ if not b:return jsonify(error="Business not found"),404
+ enabled=bool(d.get("enabled",True));r=db().whatsapp_integrations.update_one({"businessId":b["_id"]},{"$set":{"automationEnabled":enabled,"updatedAt":datetime.now(timezone.utc)}})
+ if not r.matched_count:return jsonify(error="WhatsApp is not connected"),404
+ audit(db(),str(u["_id"]),"WHATSAPP_AUTOMATION_ENABLED" if enabled else "WHATSAPP_AUTOMATION_DISABLED",str(b["_id"]));return jsonify(enabled=enabled)
+
+@app.post("/api/client/ai")
+def client_ai_config():
+ u=auth()
+ if not u:return jsonify(error="Unauthorized"),401
+ d=request.get_json() or {};b=db().businesses.find_one({"ownerId":u["_id"]});key=d.get("apiKey","").strip()
+ if not b:return jsonify(error="Business not found"),404
+ if not key:return jsonify(error="API key is required"),400
+ db().ai_credentials.update_one({"businessId":b["_id"]},{"$set":{"businessId":b["_id"],"encryptedKey":encrypt_secret(key),"model":d.get("model","gpt-5.6-luna"),"systemInstructions":d.get("systemInstructions","")[:4000],"responseTone":d.get("responseTone","Professional"),"responseLength":d.get("responseLength","Balanced"),"active":bool(d.get("enabled",True)),"updatedAt":datetime.now(timezone.utc)}},upsert=True)
+ audit(db(),str(u["_id"]),"AI_CREDENTIAL_UPDATED",str(b["_id"]),{"model":d.get("model","gpt-5.6-luna")})
+ return jsonify(message="AI configuration saved securely",enabled=bool(d.get("enabled",True)))
+
+@app.get("/api/client/ai")
+def client_ai_status():
+ u=auth()
+ if not u:return jsonify(error="Unauthorized"),401
+ b=db().businesses.find_one({"ownerId":u["_id"]});x=db().ai_credentials.find_one({"businessId":b["_id"]}) if b else None
+ return jsonify(configured=bool(x),enabled=bool(x and x.get("active")),model=x.get("model") if x else None,responseTone=x.get("responseTone") if x else None,responseLength=x.get("responseLength") if x else None)
+
+@app.get("/api/admin/audit")
+def admin_audit():
+ u=admin()
+ if not u:return jsonify(error="Unauthorized"),403
+ rows=[]
+ for x in db().audit_logs.find().sort("createdAt",-1).limit(250):
+  rows.append({"id":str(x["_id"]),"actor":x.get("actor"),"action":x.get("action"),"target":x.get("target",""),"meta":x.get("meta",{}),"createdAt":x.get("createdAt").isoformat() if x.get("createdAt") else None})
+ return jsonify(logs=rows)
+
+@app.post("/api/admin/client/role")
+def admin_client_role():
+ u=admin()
+ if not u:return jsonify(error="Unauthorized"),403
+ d=request.get_json() or {};uid=oid(d.get("userId"));role=str(d.get("role","CLIENT_OWNER")).upper()
+ if role not in {"ADMIN","CLIENT_OWNER"}:return jsonify(error="Unsupported role"),400
+ if uid==u["_id"] and role!="ADMIN":return jsonify(error="You cannot demote the current administrator"),400
+ target=db().users.find_one({"_id":uid})
+ if not target:return jsonify(error="User not found"),404
+ db().users.update_one({"_id":uid},{"$set":{"role":role,"updatedAt":datetime.now(timezone.utc)}});audit(db(),str(u["_id"]),"ADMIN_ROLE_CHANGED",str(uid),{"role":role});return jsonify(message="Role updated",role=role)
+
 @app.get("/api/webhooks/whatsapp")
 def wa_verify():
  if request.args.get("hub.mode")=="subscribe" and request.args.get("hub.verify_token")==app.config["WHATSAPP_VERIFY_TOKEN"]:return request.args.get("hub.challenge","")
  return "Forbidden",403
 @app.post("/api/webhooks/whatsapp")
-def wa_webhook():return jsonify(received=True)
+def wa_webhook():
+ payload=request.get_json(silent=True) or {}
+ db().whatsapp_messages.insert_one({"payload":payload,"receivedAt":datetime.now(timezone.utc)})
+ return jsonify(received=True)
 
 @app.post("/api/webhooks/daraja")
 def daraja_callback():
