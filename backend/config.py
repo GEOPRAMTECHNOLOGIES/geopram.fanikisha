@@ -1,5 +1,6 @@
 import os
 class Config:
+ ADMIN_PATH=os.environ.get("ADMIN_PATH","admin")
  MONGODB_URI=os.environ["MONGODB_URI"]; DATABASE_NAME=os.environ.get("DATABASE_NAME","whatsapp_saas")
  SESSION_SECRET=os.environ["SESSION_SECRET"]; ENCRYPTION_KEY=os.environ["ENCRYPTION_KEY"]; COOKIE_NAME=os.environ.get("COOKIE_NAME","fluent_session"); COOKIE_SECURE=os.environ.get("COOKIE_SECURE","true").lower()=="true"; COOKIE_DOMAIN=os.environ.get("COOKIE_DOMAIN") or None
  SMTP_HOST=os.environ.get("SMTP_HOST","smtp.gmail.com"); SMTP_PORT=int(os.environ.get("SMTP_PORT","587")); SMTP_USERNAME=os.environ.get("SMTP_USERNAME",""); SMTP_PASSWORD=os.environ.get("SMTP_PASSWORD",""); SMTP_FROM=os.environ.get("SMTP_FROM","")

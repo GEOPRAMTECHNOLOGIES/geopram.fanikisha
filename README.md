@@ -26,3 +26,26 @@ Vercel supports Flask through the Python runtime; `api/index.py` imports the Fla
 This scaffold is the core system, not a claim that every external provider is already live-configured. Before public launch, add/enable: email OTP verification and password reset, Redis rate limiting/queues, WhatsApp signature validation, exact Daraja API flow approved for your production app, idempotent payment callbacks, background jobs, monitoring, automated tests, and Google Sheets export if desired.
 
 Do not put any real API keys in source control or in chat.
+
+## Admin login and database role
+
+There is no hard-coded administrator account. Create a normal account or insert/update a user in MongoDB, then set that user's `role` field to exactly `ADMIN` and `emailVerified` to `true`. The login endpoint checks the database user record, and the configured `ADMIN_PATH` is protected by a signed session cookie. Direct access to `/admin-ui` or `__ADMIN__` is also blocked unless the session has the `ADMIN` role.
+
+Example MongoDB update (replace the email):
+
+```javascript
+db.users.updateOne(
+  { email: "admin@example.com" },
+  { $set: { role: "ADMIN", emailVerified: true } }
+)
+```
+
+The password must still be created using the included `scripts/create_admin.py` or through the application's password registration flow; do not put a plaintext password into MongoDB.
+
+Set `ADMIN_PATH` in Vercel, for example:
+
+```env
+ADMIN_PATH=control-center-a8K4mQ72
+```
+
+Then an authenticated ADMIN reaches `/control-center-a8K4mQ72`. A client account, even if it knows the URL, is redirected to login and cannot render the admin UI.

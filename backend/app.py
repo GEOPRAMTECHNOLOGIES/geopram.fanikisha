@@ -43,7 +43,7 @@ def login():
  d=request.get_json() or {};u=db().users.find_one({"email":d.get("email","").strip().lower()})
  if not u or not verify_password(d.get("password",""),u["passwordHash"]):return jsonify(error="Invalid credentials"),401
  if u.get("role")!="ADMIN" and not u.get("emailVerified"):return jsonify(error="Email verification required"),403
- r=make_response(jsonify(ok=True,role="admin" if u.get("role")=="ADMIN" else "client"));r.set_cookie(app.config["COOKIE_NAME"],token_for(u),httponly=True,secure=app.config["COOKIE_SECURE"],samesite="Lax",max_age=43200,path="/",domain=app.config.get("COOKIE_DOMAIN"));return r
+ r=make_response(jsonify(ok=True,role="admin" if u.get("role")=="ADMIN" else "client",redirectPath=("/"+app.config["ADMIN_PATH"].strip("/") if u.get("role")=="ADMIN" else "/dashboard")));r.set_cookie(app.config["COOKIE_NAME"],token_for(u),httponly=True,secure=app.config["COOKIE_SECURE"],samesite="Lax",max_age=43200,path="/",domain=app.config.get("COOKIE_DOMAIN"));return r
 @app.post("/api/auth/logout")
 def logout():
  r=make_response(jsonify(ok=True));r.delete_cookie(app.config["COOKIE_NAME"],path="/");return r
