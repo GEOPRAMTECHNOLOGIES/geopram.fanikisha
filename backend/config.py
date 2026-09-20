@@ -10,4 +10,4 @@ class Config:
  WHATSAPP_VERIFY_TOKEN=os.environ.get("WHATSAPP_VERIFY_TOKEN",""); WHATSAPP_APP_SECRET=os.environ.get("WHATSAPP_APP_SECRET","")
  GOOGLE_SERVICE_ACCOUNT_JSON=os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON",""); GOOGLE_SHEET_ID=os.environ.get("GOOGLE_SHEET_ID","")
 
-# Admin-role integration review: this file is included in the complete deployment build.
+# Project integration marker: complete admin-role + registration build

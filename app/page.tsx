@@ -1,4 +1,4 @@
 import Link from "next/link";
 export default function Home(){return <main className="min-h-screen p-8"><div className="mx-auto max-w-6xl"><header className="mb-10 flex items-center justify-between"><div><div className="text-xs font-bold uppercase tracking-widest text-blue-700">Business Automation</div><h1 className="mt-2 text-4xl font-semibold">Fluent Operations Console</h1><p className="mt-2 text-gray-600">WhatsApp, AI, billing, M-Pesa and account administration.</p></div><Link className="fluent-primary" href="/login">Sign in</Link></header><div className="grid gap-4 md:grid-cols-3">{["Client dashboard","Secure admin console","WhatsApp + AI automation","Invoices and receipts","M-Pesa integration","Audit and security"].map(x=><div className="fluent-card p-5" key={x}><h2 className="font-semibold">{x}</h2><p className="mt-2 text-sm text-gray-600">Production-oriented application module.</p></div>)}</div></div></main>}
 
-/* Admin-role integration review: included in complete deployment build. */
+<!-- Project integration marker: complete admin-role + registration build -->

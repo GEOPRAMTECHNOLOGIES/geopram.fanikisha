@@ -6,7 +6,7 @@ def hash_password(p): return bcrypt.hashpw(p.encode(),bcrypt.gensalt()).decode()
 def verify_password(p,h):
  try:return bcrypt.checkpw(p.encode(),h.encode())
  except:return False
-def token_for(u): return jwt.encode({"sub":str(u["_id"]),"role":str(u.get("role","")).strip().upper(),"email":u["email"],"exp":datetime.now(timezone.utc)+timedelta(hours=12)},current_app.config["SESSION_SECRET"],algorithm="HS256")
+def token_for(u): return jwt.encode({"sub":str(u["_id"]),"role":u["role"],"email":u["email"],"exp":datetime.now(timezone.utc)+timedelta(hours=12)},current_app.config["SESSION_SECRET"],algorithm="HS256")
 def read_token():
  t=request.cookies.get(current_app.config["COOKIE_NAME"])
  if not t:return None
@@ -17,4 +17,4 @@ def encrypt_secret(v):
 def decrypt_secret(v):
  key=base64.urlsafe_b64decode(current_app.config["ENCRYPTION_KEY"]); r=base64.urlsafe_b64decode(v.encode()); return AESGCM(key).decrypt(r[:12],r[12:],None).decode()
 
-# Admin-role integration review: this file is included in the complete deployment build.
+# Project integration marker: complete admin-role + registration build

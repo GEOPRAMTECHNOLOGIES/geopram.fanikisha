@@ -14,13 +14,9 @@ def auth():
  t=read_token()
  if not t:return None
  return db().users.find_one({"_id":oid(t["sub"])})
-def is_admin_role(user):
- # MongoDB is the authoritative source for admin authorization.
- return bool(user and str(user.get("role", "")).strip().upper() == "ADMIN")
-
 def admin():
- u=auth()
- return u if is_admin_role(u) else None
+ # Authorization source of truth: the current MongoDB user document role.
+ u=auth();return u if u and str(u.get("role","")).upper()=="ADMIN" else None
 @app.get("/api/health")
 def health():
  try:
@@ -56,15 +52,15 @@ def verify_email():
  db().verification_tokens.update_one({"_id":tok["_id"]},{"$set":{"used":True}});db().users.update_one({"_id":u["_id"]},{"$set":{"emailVerified":True}});return jsonify(message="Email verified")
 @app.get("/api/auth/registration-status")
 def registration_status():
- enabled = db().settings.find_one({"key":"registration_enabled"})
- return jsonify(enabled=True if enabled is None else bool(enabled.get("value", True)))
+ enabled=db().settings.find_one({"key":"registration_enabled"})
+ return jsonify(enabled=True if enabled is None else bool(enabled.get("value",True)))
 
 @app.post("/api/auth/login")
 def login():
  d=request.get_json() or {};u=db().users.find_one({"email":d.get("email","").strip().lower()})
  if not u or not verify_password(d.get("password",""),u["passwordHash"]):return jsonify(error="Invalid credentials"),401
- if not is_admin_role(u) and not u.get("emailVerified"):return jsonify(error="Email verification required"),403
- r=make_response(jsonify(ok=True,role="admin" if is_admin_role(u) else "client",redirectPath=("/"+app.config["ADMIN_PATH"].strip("/") if is_admin_role(u) else "/dashboard")));r.set_cookie(app.config["COOKIE_NAME"],token_for(u),httponly=True,secure=app.config["COOKIE_SECURE"],samesite="Lax",max_age=43200,path="/",domain=app.config.get("COOKIE_DOMAIN"));return r
+ if str(u.get("role","")).upper()!="ADMIN" and not u.get("emailVerified"):return jsonify(error="Email verification required"),403
+ r=make_response(jsonify(ok=True,role="admin" if str(u.get("role","")).upper()=="ADMIN" else "client",redirectPath=("/"+app.config["ADMIN_PATH"].strip("/") if str(u.get("role","")).upper()=="ADMIN" else "/dashboard")));r.set_cookie(app.config["COOKIE_NAME"],token_for(u),httponly=True,secure=app.config["COOKIE_SECURE"],samesite="Lax",max_age=43200,path="/",domain=app.config.get("COOKIE_DOMAIN"));return r
 @app.post("/api/auth/logout")
 def logout():
  r=make_response(jsonify(ok=True));r.delete_cookie(app.config["COOKIE_NAME"],path="/");return r
@@ -73,22 +69,14 @@ def me():
  u=auth()
  if not u:return jsonify(error="Unauthorized"),401
  return jsonify(id=str(u["_id"]),email=u["email"],role=u["role"],emailVerified=u.get("emailVerified",False))
-
-@app.get("/api/auth/session")
-def session():
- # This endpoint exposes only the current authorization state, never credentials.
- u=auth()
- if not u:
-  return jsonify(authenticated=False),401
- return jsonify(authenticated=True,isAdmin=is_admin_role(u),role=u.get("role"),email=u.get("email"))
 @app.post("/api/admin/registration")
 def registration_toggle():
  u=admin()
  if not u:return jsonify(error="Unauthorized"),403
- d=request.get_json() or {}; enabled=bool(d.get("enabled",True))
+ d=request.get_json() or {};enabled=bool(d.get("enabled",True))
  db().settings.update_one({"key":"registration_enabled"},{"$set":{"key":"registration_enabled","value":enabled,"updatedAt":datetime.now(timezone.utc),"updatedBy":u["_id"]}},upsert=True)
  audit(db(),str(u["_id"]),"TOGGLE_REGISTRATION",meta={"enabled":enabled})
- return jsonify(enabled=enabled,message="Client registration " + ("enabled" if enabled else "disabled"))
+ return jsonify(enabled=enabled,message="Client registration "+("enabled" if enabled else "disabled"))
 
 @app.post("/api/admin/subscription")
 def subscription():
@@ -164,7 +152,7 @@ def send_document():
 def pdf(docid):
  u=auth();x=db().documents.find_one({"_id":oid(docid)}) if u else None
  if not x:return jsonify(error="Not found"),404
- if u.get("role")!="ADMIN" and not x.get("approved"):return jsonify(error="Not found"),404
+ if str(u.get("role","")).upper()!="ADMIN" and not x.get("approved"):return jsonify(error="Not found"),404
  r=make_response(document_pdf(x));r.headers["Content-Type"]="application/pdf";r.headers["Content-Disposition"]=f'inline; filename="{x["number"]}.pdf"';return r
 @app.get("/api/webhooks/whatsapp")
 def wa_verify():
@@ -177,4 +165,4 @@ def wa_webhook():return jsonify(received=True)
 def daraja_callback():
  payload=request.get_json(silent=True) or {};db().daraja_callbacks.insert_one({"payload":payload,"createdAt":datetime.now(timezone.utc)});return jsonify(ResultCode=0,ResultDesc="Accepted")
 
-# Admin-role integration review: this file is included in the complete deployment build.
+# Project integration marker: complete admin-role + registration build

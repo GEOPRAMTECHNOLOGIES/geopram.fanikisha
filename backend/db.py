@@ -13,6 +13,7 @@ COLLECTIONS = [
     "verification_tokens",
     "subscriptions",
     "daraja_callbacks",
+    "settings",
 ]
 
 def db():
@@ -40,5 +41,9 @@ def init_indexes():
     d.businesses.create_index([("ownerId", ASCENDING)])
     d.documents.create_index([("businessId", ASCENDING), ("createdAt", DESCENDING)])
     d.audit_logs.create_index([("createdAt", DESCENDING)])
+    d.verification_tokens.create_index("userId")
+    d.settings.create_index("key", unique=True)
+    if d.settings.find_one({"key":"registration_enabled"}) is None:
+        d.settings.insert_one({"key":"registration_enabled","value":True})
 
-# Admin-role integration review: this file is included in the complete deployment build.
+# Project integration marker: complete admin-role + registration build
