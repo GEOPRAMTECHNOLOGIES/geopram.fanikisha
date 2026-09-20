@@ -18,9 +18,18 @@ def admin():
  u=auth();return u if u and u.get("role")=="ADMIN" else None
 @app.get("/api/health")
 def health():
- try:db().command("ping");ok=True
- except:ok=False
- return jsonify(ok=ok,service="fluent-business-automation")
+ try:
+  d = db()
+  d.command("ping")
+  return jsonify(
+   ok=True,
+   service="fluent-business-automation",
+   database=d.name,
+   collections=sorted(d.list_collection_names()),
+   userCount=d.users.count_documents({}),
+  )
+ except Exception as e:
+  return jsonify(ok=False,service="fluent-business-automation",error="MongoDB connection failed"),503
 @app.post("/api/auth/register")
 def register():
  d=request.get_json() or {};email=d.get("email","").strip().lower();password=d.get("password","");name=d.get("businessName","").strip()

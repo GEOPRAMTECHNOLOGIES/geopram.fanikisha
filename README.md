@@ -13,7 +13,7 @@ Next.js + TypeScript + Tailwind frontend, Flask/Python backend, MongoDB Atlas, s
 - Daraja credentials are never stored in MongoDB.
 
 ## Deploy
-1. Create MongoDB Atlas database/user.
+1. Create a MongoDB Atlas project and database user. Set `DATABASE_NAME=whatsapp_saas`. You do not need to manually create a database in Atlas; the deployment creates the application collections on startup.
 2. Copy `.env.example` and generate `SESSION_SECRET` and `ENCRYPTION_KEY`.
 3. Seed first admin with `scripts/create_admin.py`.
 4. Set Vercel Production environment variables.
@@ -49,3 +49,20 @@ ADMIN_PATH=control-center-a8K4mQ72
 ```
 
 Then an authenticated ADMIN reaches `/control-center-a8K4mQ72`. A client account, even if it knows the URL, is redirected to login and cannot render the admin UI.
+
+
+## MongoDB visibility and login diagnostics
+
+The application database is **`whatsapp_saas`** unless `DATABASE_NAME` is changed in Vercel. The deployment explicitly creates these collections on startup: `users`, `businesses`, `documents`, `audit_logs`, `ai_credentials`, `verification_tokens`, `subscriptions`, and `daraja_callbacks`.
+
+After deployment, open `/api/health`. A healthy response includes the active database name, collection names, and user count. This is a safe diagnostic endpoint and does not expose MongoDB credentials.
+
+If login returns `401 Invalid credentials`, verify that the account exists in the **same Atlas cluster/database configured by `MONGODB_URI` and `DATABASE_NAME`**. If you registered an account before changing the database settings, that account may exist in a different database.
+
+For the admin account, the existing user document must contain:
+
+```javascript
+{ role: "ADMIN", emailVerified: true }
+```
+
+Do not put a plaintext password in MongoDB.
