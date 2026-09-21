@@ -1,7 +1,7 @@
 "use client";
 import {useEffect,useState} from "react";
 import type {ReactNode} from "react";
-import {Activity,BarChart3,Bot,CreditCard,FileText,LayoutDashboard,LogOut,MessageSquare,ReceiptText,Search,Send,Settings,Users,WalletCards} from "lucide-react";
+import {Activity,BarChart3,Bot,CreditCard,FileText,LayoutDashboard,Loader2,LogOut,MessageSquare,ReceiptText,Search,Send,Settings,ShieldCheck,Users,WalletCards} from "lucide-react";
 import {ThemeControl,MobileMenu,StatusPill,HelpCenter} from "../components";
 
 const nav=[
