@@ -443,19 +443,21 @@ def public_invoice_pay(token):
             checkout=data.get("CheckoutRequestID")
             if r.status_code >= 400 or (response_code and response_code != "0") or not checkout:
                 reason=data.get("ResponseDescription") or data.get("errorMessage") or data.get("CustomerMessage") or f"HTTP {r.status_code}"
-                db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":reason,"providerResponse":data}})
+                exact_error=str(reason)[:500]
+                update={"status":"FAILED","failureReason":exact_error,"providerResponse":data,"providerStatusCode":r.status_code,"darajaErrorCode":response_code or None,"darajaError":exact_error,"failedAt":now()}
+                db().payments.update_one({"_id":pid},{"$set":update})
                 app.logger.error("Daraja STK rejected invoice payment: status=%s response=%s", r.status_code, data)
-                audit(db(),"PUBLIC","PAYMENT_STK_FAILED",str(pid),{"invoiceId":str(inv["_id"]),"reason":str(reason)[:200]})
-                return jsonify(error=f"M-Pesa could not start the payment: {reason}"),502
-            db().payments.update_one({"_id":pid},{"$set":{"checkoutRequestId":checkout,"merchantRequestId":data.get("MerchantRequestID"),"providerResponse":data}})
+                audit(db(),"PUBLIC","PAYMENT_STK_FAILED",str(pid),{"invoiceId":str(inv["_id"]),"reason":exact_error,"darajaErrorCode":response_code or None,"httpStatus":r.status_code})
+                return jsonify(error=f"M-Pesa could not start the payment: {exact_error}",darajaError=exact_error,darajaErrorCode=response_code or None,retryable=True,fallbackPaymentUrl=f"/pay/{token}"),502
+            db().payments.update_one({"_id":pid},{"$set":{"checkoutRequestId":checkout,"merchantRequestId":data.get("MerchantRequestID"),"providerResponse":data,"providerStatusCode":r.status_code}})
             audit(db(),"PUBLIC","PAYMENT_STK_INITIATED",str(pid),{"invoiceId":str(inv["_id"])})
             return jsonify(message=data.get("CustomerMessage") or "Check your phone for the M-Pesa prompt",paymentId=str(pid),checkoutRequestId=checkout),200
         except Exception as e:
-            reason=str(e)[:300]
-            db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":reason}})
+            reason=str(e)[:500]
+            db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":reason,"darajaError":reason,"failedAt":now()}})
             app.logger.exception("Daraja STK exception for invoice payment: %s", reason)
             audit(db(),"PUBLIC","PAYMENT_STK_FAILED",str(pid),{"invoiceId":str(inv["_id"]),"reason":reason})
-            return jsonify(error="Unable to start M-Pesa payment",detail=reason),502
+            return jsonify(error="Unable to start M-Pesa payment",detail=reason,darajaError=reason,retryable=True,fallbackPaymentUrl=f"/pay/{token}"),502
     audit(db(),"PUBLIC","PAYMENT_CREATED",str(pid),{"invoiceId":str(inv["_id"])})
     return jsonify(message="Payment request recorded",paymentId=str(pid)),201
 
@@ -590,11 +592,15 @@ def mpesa_callback():
     if checkout:
         payment=db().payments.find_one({"checkoutRequestId":checkout})
         if payment:
-            update={"status":status,"callback":payload,"verifiedAt":now(),"resultCode":code,"resultDescription":cb.get("ResultDesc","")}
+            result_description=str(cb.get("ResultDesc","") or "")
+            update={"status":status,"callback":payload,"verifiedAt":now(),"resultCode":code,"resultDescription":result_description,"darajaResultCode":code,"darajaResultDescription":result_description}
             if metadata.get("MpesaReceiptNumber") is not None:update["mpesaReceiptNumber"]=str(metadata.get("MpesaReceiptNumber"))
             if metadata.get("TransactionDate") is not None:update["transactionDate"]=str(metadata.get("TransactionDate"))
             if metadata.get("PhoneNumber") is not None:update["paidPhone"]=str(metadata.get("PhoneNumber"))
-            if status!="PAID":update["failureReason"]=cb.get("ResultDesc","")
+            if status!="PAID":
+                update["failureReason"]=result_description
+                update["darajaError"]=result_description
+                update["failedAt"]=now()
             db().payments.update_one({"_id":payment["_id"]},{"$set":update})
             if payment.get("invoiceId"):
                 inv=db().invoices.find_one({"_id":payment["invoiceId"]})
@@ -616,7 +622,7 @@ def mpesa_callback():
                             audit(db(),"DARaja","RECEIPT_CREATED",str(receipt["_id"]),{"invoiceId":str(inv["_id"]),"emailSent":bool(inv.get("customerEmail"))})
                     else:
                         db().invoices.update_one({"_id":inv["_id"]},{"$set":{"status":"UNPAID"}})
-            audit(db(),"DARaja","PAYMENT_CALLBACK",str(payment["_id"]),{"status":status,"resultCode":code,"checkoutRequestId":checkout})
+            audit(db(),"DARaja","PAYMENT_CALLBACK",str(payment["_id"]),{"status":status,"resultCode":code,"resultDescription":result_description[:300],"checkoutRequestId":checkout})
     return jsonify(ResultCode=0,ResultDesc="Accepted")
 
 @app.get("/api/client/reports")
