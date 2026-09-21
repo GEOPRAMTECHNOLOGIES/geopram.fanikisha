@@ -1,5 +1,6 @@
 import csv, io, json, secrets, base64, hashlib
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, request, make_response, Response
 from bson import ObjectId
 from .config import Config
@@ -348,10 +349,13 @@ def public_invoice_pay(token):
             if auth_resp.status_code != 200 or not access:
                 reason=auth_data.get("error_description") or auth_data.get("errorMessage") or f"HTTP {auth_resp.status_code}"
                 raise RuntimeError(f"Daraja authentication failed: {reason}")
-            ts=now().strftime("%Y%m%d%H%M%S");password=b64.b64encode((c["DARAJA_SHORTCODE"]+c["DARAJA_PASSKEY"]+ts).encode()).decode()
-            tx_type=c.get("DARAJA_TRANSACTION_TYPE") or "CustomerPayBillOnline"
+            # Daraja expects the STK timestamp in Kenya/East Africa time, not UTC.
+            ts=datetime.now(ZoneInfo("Africa/Nairobi")).strftime("%Y%m%d%H%M%S")
+            tx_type=c.get("DARAJA_TRANSACTION_TYPE") or ("CustomerBuyGoodsOnline" if c.get("DARAJA_TILL_NUMBER") else "CustomerPayBillOnline")
+            business_shortcode=(c.get("DARAJA_TILL_NUMBER") or c["DARAJA_SHORTCODE"]) if tx_type=="CustomerBuyGoodsOnline" else c["DARAJA_SHORTCODE"]
+            password=b64.b64encode((business_shortcode+c["DARAJA_PASSKEY"]+ts).encode()).decode()
             party_b=c.get("DARAJA_TILL_NUMBER") if tx_type=="CustomerBuyGoodsOnline" and c.get("DARAJA_TILL_NUMBER") else c["DARAJA_SHORTCODE"]
-            payload={"BusinessShortCode":c["DARAJA_SHORTCODE"],"Password":password,"Timestamp":ts,"TransactionType":tx_type,"Amount":max(1,int(round(float(inv["amount"])))),"PartyA":phone,"PartyB":party_b,"PhoneNumber":phone,"CallBackURL":c["DARAJA_CALLBACK_URL"],"AccountReference":inv.get("number","Invoice")[:20],"TransactionDesc":inv.get("title","Invoice payment")[:20]}
+            payload={"BusinessShortCode":business_shortcode,"Password":password,"Timestamp":ts,"TransactionType":tx_type,"Amount":max(1,int(round(float(inv["amount"])))),"PartyA":phone,"PartyB":party_b,"PhoneNumber":phone,"CallBackURL":c["DARAJA_CALLBACK_URL"],"AccountReference":str(inv.get("number","Invoice"))[:12],"TransactionDesc":str(inv.get("title","Invoice payment"))[:13]}
             r=rq.post(base+"/mpesa/stkpush/v1/processrequest",headers={"Authorization":"Bearer "+access,"Content-Type":"application/json"},json=payload,timeout=30)
             try: data=r.json()
             except Exception: data={}
@@ -360,6 +364,7 @@ def public_invoice_pay(token):
             if r.status_code >= 400 or (response_code and response_code != "0") or not checkout:
                 reason=data.get("ResponseDescription") or data.get("errorMessage") or data.get("CustomerMessage") or f"HTTP {r.status_code}"
                 db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":reason,"providerResponse":data}})
+                app.logger.error("Daraja STK rejected invoice payment: status=%s response=%s", r.status_code, data)
                 audit(db(),"PUBLIC","PAYMENT_STK_FAILED",str(pid),{"invoiceId":str(inv["_id"]),"reason":str(reason)[:200]})
                 return jsonify(error=f"M-Pesa could not start the payment: {reason}"),502
             db().payments.update_one({"_id":pid},{"$set":{"checkoutRequestId":checkout,"merchantRequestId":data.get("MerchantRequestID"),"providerResponse":data}})
@@ -368,6 +373,7 @@ def public_invoice_pay(token):
         except Exception as e:
             reason=str(e)[:300]
             db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":reason}})
+            app.logger.exception("Daraja STK exception for invoice payment: %s", reason)
             audit(db(),"PUBLIC","PAYMENT_STK_FAILED",str(pid),{"invoiceId":str(inv["_id"]),"reason":reason})
             return jsonify(error="Unable to start M-Pesa payment",detail=reason),502
     audit(db(),"PUBLIC","PAYMENT_CREATED",str(pid),{"invoiceId":str(inv["_id"])})
@@ -460,8 +466,11 @@ def client_mpesa_stk():
     try:
         import requests as rq, base64 as b64
         token=rq.get(c["DARAJA_BASE_URL"]+"/oauth/v1/generate?grant_type=client_credentials",auth=(c["DARAJA_CONSUMER_KEY"],c["DARAJA_CONSUMER_SECRET"]),timeout=20).json()["access_token"]
-        ts=now().strftime("%Y%m%d%H%M%S");password=b64.b64encode((c["DARAJA_SHORTCODE"]+c["DARAJA_PASSKEY"]+ts).encode()).decode()
-        payload={"BusinessShortCode":c["DARAJA_SHORTCODE"],"Password":password,"Timestamp":ts,"TransactionType":c.get("DARAJA_TRANSACTION_TYPE") or "CustomerPayBillOnline","Amount":int(amount),"PartyA":phone,"PartyB":c["DARAJA_SHORTCODE"],"PhoneNumber":phone,"CallBackURL":c["DARAJA_CALLBACK_URL"],"AccountReference":d.get("accountReference","Invoice"),"TransactionDesc":d.get("description","Payment")}
+        ts=datetime.now(ZoneInfo("Africa/Nairobi")).strftime("%Y%m%d%H%M%S")
+        tx_type=c.get("DARAJA_TRANSACTION_TYPE") or ("CustomerBuyGoodsOnline" if c.get("DARAJA_TILL_NUMBER") else "CustomerPayBillOnline")
+        business_shortcode=(c.get("DARAJA_TILL_NUMBER") or c["DARAJA_SHORTCODE"]) if tx_type=="CustomerBuyGoodsOnline" else c["DARAJA_SHORTCODE"]
+        password=b64.b64encode((business_shortcode+c["DARAJA_PASSKEY"]+ts).encode()).decode()
+        payload={"BusinessShortCode":business_shortcode,"Password":password,"Timestamp":ts,"TransactionType":tx_type,"Amount":int(amount),"PartyA":phone,"PartyB":(c.get("DARAJA_TILL_NUMBER") if tx_type=="CustomerBuyGoodsOnline" and c.get("DARAJA_TILL_NUMBER") else c["DARAJA_SHORTCODE"]),"PhoneNumber":phone,"CallBackURL":c["DARAJA_CALLBACK_URL"],"AccountReference":str(d.get("accountReference","Invoice"))[:12],"TransactionDesc":str(d.get("description","Payment"))[:13]}
         r=rq.post(c["DARAJA_BASE_URL"]+"/mpesa/stkpush/v1/processrequest",headers={"Authorization":"Bearer "+token},json=payload,timeout=30);data=r.json()
     except Exception as e:return jsonify(error=f"Daraja request failed: {e}"),502
     pid=db().payments.insert_one({"businessId":b["_id"],"amount":amount,"currency":"KES","phone":phone,"status":"PENDING","method":"M-Pesa STK","checkoutRequestId":data.get("CheckoutRequestID"),"merchantRequestId":data.get("MerchantRequestID"),"createdAt":now()}).inserted_id;audit(db(),str(u["_id"]),"PAYMENT_STK_INITIATED",str(pid));return jsonify(message=data.get("CustomerMessage") or "STK push initiated",payment=clean({"_id":pid,**data}))
@@ -582,9 +591,68 @@ def admin_subscriptions():
 
 @app.post("/api/admin/plans")
 def admin_plan():
-    u=admin();
+    u=admin()
     if not u:return jsonify(error="Unauthorized"),403
-    d=json_body();x={"name":d.get("name","Standard"),"amount":float(d.get("amount",0)),"currency":d.get("currency","KES"),"days":int(d.get("days",30)),"features":d.get("features",[]),"active":bool(d.get("active",True)),"createdAt":now()};pid=db().plans.insert_one(x).inserted_id;audit(db(),str(u["_id"]),"PLAN_CREATED",str(pid));return jsonify(plan=clean({**x,"_id":pid})),201
+    d=json_body();name=str(d.get("name") or "").strip()
+    if not name:return jsonify(error="Plan name is required"),400
+    try: amount=float(d.get("amount",0)); days=int(d.get("days",30))
+    except (TypeError,ValueError):return jsonify(error="Amount and duration must be valid numbers"),400
+    if amount<0 or days<1:return jsonify(error="Amount cannot be negative and duration must be at least 1 day"),400
+    features=d.get("features",[])
+    if isinstance(features,str):features=[x.strip() for x in features.split("\n") if x.strip()]
+    if not isinstance(features,list):features=[]
+    x={"name":name,"amount":amount,"currency":str(d.get("currency") or "KES").upper(),"days":days,"features":[str(v).strip() for v in features if str(v).strip()],"active":bool(d.get("active",True)),"createdAt":now(),"updatedAt":now()}
+    pid=db().plans.insert_one(x).inserted_id
+    audit(db(),str(u["_id"]),"PLAN_CREATED",str(pid),{"name":name,"active":x["active"]})
+    return jsonify(plan=clean({**x,"_id":pid})),201
+
+@app.patch("/api/admin/plans/<pid>")
+def admin_plan_update(pid):
+    u=admin()
+    if not u:return jsonify(error="Unauthorized"),403
+    plan_id=oid(pid);existing=db().plans.find_one({"_id":plan_id})
+    if not existing:return jsonify(error="Plan not found"),404
+    d=json_body();updates={}
+    if "name" in d:
+        name=str(d.get("name") or "").strip()
+        if not name:return jsonify(error="Plan name is required"),400
+        updates["name"]=name
+    if "amount" in d:
+        try:updates["amount"]=float(d.get("amount"))
+        except (TypeError,ValueError):return jsonify(error="Amount must be a valid number"),400
+        if updates["amount"]<0:return jsonify(error="Amount cannot be negative"),400
+    if "days" in d:
+        try:updates["days"]=int(d.get("days"))
+        except (TypeError,ValueError):return jsonify(error="Duration must be a valid number"),400
+        if updates["days"]<1:return jsonify(error="Duration must be at least 1 day"),400
+    if "currency" in d:updates["currency"]=str(d.get("currency") or "KES").upper()
+    if "features" in d:
+        features=d.get("features",[])
+        if isinstance(features,str):features=[x.strip() for x in features.split("\n") if x.strip()]
+        updates["features"]=[str(v).strip() for v in features if str(v).strip()] if isinstance(features,list) else []
+    if "active" in d:updates["active"]=bool(d.get("active"))
+    if not updates:return jsonify(plan=clean(existing),message="No plan changes supplied")
+    updates["updatedAt"]=now();db().plans.update_one({"_id":plan_id},{"$set":updates})
+    audit(db(),str(u["_id"]),"PLAN_UPDATED",pid,{"fields":list(updates.keys()),"active":updates.get("active",existing.get("active",False))})
+    return jsonify(plan=clean({**existing,**updates}),message="Plan updated")
+
+@app.post("/api/admin/plans/<pid>/toggle")
+def admin_plan_toggle(pid):
+    u=admin()
+    if not u:return jsonify(error="Unauthorized"),403
+    plan_id=oid(pid);existing=db().plans.find_one({"_id":plan_id})
+    if not existing:return jsonify(error="Plan not found"),404
+    active=bool(json_body().get("active",not bool(existing.get("active",False))))
+    db().plans.update_one({"_id":plan_id},{"$set":{"active":active,"updatedAt":now()}})
+    audit(db(),str(u["_id"]),"PLAN_ACTIVATED" if active else "PLAN_DEACTIVATED",pid,{"active":active})
+    return jsonify(active=active,message=f"Plan {'activated' if active else 'deactivated'}")
+
+@app.get("/api/admin/payment-config")
+def admin_payment_config():
+    if not admin():return jsonify(error="Unauthorized"),403
+    c=app.config
+    tx=c.get("DARAJA_TRANSACTION_TYPE") or ("CustomerBuyGoodsOnline" if c.get("DARAJA_TILL_NUMBER") else "CustomerPayBillOnline")
+    return jsonify(environment=c.get("DARAJA_ENV","production"),baseUrl=c.get("DARAJA_BASE_URL",""),shortCode=c.get("DARAJA_SHORTCODE",""),tillNumber=c.get("DARAJA_TILL_NUMBER",""),transactionType=tx,callbackUrl=c.get("DARAJA_CALLBACK_URL",""),configured=bool(c.get("DARAJA_CONSUMER_KEY") and c.get("DARAJA_CONSUMER_SECRET") and c.get("DARAJA_PASSKEY") and (c.get("DARAJA_TILL_NUMBER") or c.get("DARAJA_SHORTCODE")) and c.get("DARAJA_CALLBACK_URL")))
 
 @app.get("/api/admin/payments")
 def admin_payments():
