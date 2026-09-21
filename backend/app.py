@@ -250,6 +250,19 @@ def customer_delete(cid):
     if not r.deleted_count:return jsonify(error="Customer not found"),404
     audit(db(),str(u["_id"]),"CUSTOMER_DELETED",cid);return jsonify(message="Customer deleted")
 
+def active_subscription_for(b):
+    if not b:return None
+    sub=db().subscriptions.find_one({"businessId":b["_id"],"status":"ACTIVE"})
+    if not sub:return None
+    ends=sub.get("endsAt")
+    if ends:
+        try:
+            dt=ends if isinstance(ends,datetime) else datetime.fromisoformat(str(ends).replace("Z","+00:00"))
+            if dt < now():
+                db().subscriptions.update_one({"_id":sub["_id"]},{"$set":{"status":"EXPIRED"}});return None
+        except Exception:pass
+    return sub
+
 @app.get("/api/client/ai")
 def client_ai():
     u=require_client();
@@ -272,6 +285,7 @@ def client_ai_respond():
     if not u:return jsonify(error="Unauthorized"),401
     b=owner_business(u);x=db().ai_credentials.find_one({"businessId":b["_id"],"active":True,"enabled":True}) if b else None
     if not x:return jsonify(error="AI is not enabled"),400
+    if not active_subscription_for(b):return jsonify(error="An active subscription is required to use AI. Open Subscriptions to choose a plan and pay securely with M-Pesa."),402
     d=json_body()
     try:
         from openai import OpenAI
@@ -305,8 +319,45 @@ def client_subscribe():
     if not u:return jsonify(error="Unauthorized"),401
     b=owner_business(u);d=json_body();p=db().plans.find_one({"_id":oid(d.get("planId")),"active":True})
     if not p:return jsonify(error="Plan not found"),404
-    x={"businessId":b["_id"],"planId":p["_id"],"plan":p["name"],"amount":p.get("amount",0),"currency":p.get("currency","KES"),"status":"ACTIVE","startsAt":now(),"endsAt":now()+timedelta(days=int(p.get("days",30)))}
-    db().subscriptions.update_one({"businessId":b["_id"]},{"$set":x},upsert=True);audit(db(),str(u["_id"]),"SUBSCRIPTION_CREATED",str(b["_id"]),{"plan":p["name"]});return jsonify(subscription=clean(x))
+    x={"businessId":b["_id"],"planId":p["_id"],"plan":p["name"],"amount":p.get("amount",0),"currency":p.get("currency","KES"),"status":"ACTIVE","startsAt":now(),"endsAt":now()+timedelta(days=int(p.get("days",30))),"paymentMethod":"Manual/legacy"}
+    db().subscriptions.update_one({"businessId":b["_id"]},{"$set":x},upsert=True);audit(db(),str(u["_id"]),"SUBSCRIPTION_CREATED",str(b["_id"]),{"plan":p["name"]});return jsonify(subscription=clean(x),message="Subscription activated")
+
+@app.post("/api/client/subscriptions/checkout")
+def client_subscription_checkout():
+    u=require_client();
+    if not u:return jsonify(error="Unauthorized"),401
+    b=owner_business(u);d=json_body();p=db().plans.find_one({"_id":oid(d.get("planId")),"active":True})
+    if not p:return jsonify(error="Plan not found"),404
+    phone=(d.get("phone") or "").strip();digits="".join(ch for ch in phone if ch.isdigit())
+    if digits.startswith("0") and len(digits)==10:digits="254"+digits[1:]
+    elif not (digits.startswith("254") and len(digits)==12):return jsonify(error="Enter a valid Kenyan M-Pesa number, e.g. 0712345678"),400
+    public_token=secrets.token_urlsafe(30);token_hash=hashlib.sha256(public_token.encode()).hexdigest()
+    number=f"SUB-{datetime.now().strftime('%Y%m%d')}-{secrets.token_hex(3).upper()}"
+    inv={"businessId":b["_id"],"number":number,"title":f"{p['name']} subscription","description":f"Subscription for {p['name']} · {int(p.get('days',30))} days","amount":float(p.get("amount",0)),"currency":p.get("currency","KES"),"status":"UNPAID","customerName":b.get("businessName",u.get("email","Customer")),"customerEmail":b.get("email",u.get("email","")),"paymentEnabled":True,"paymentTokenHash":token_hash,"paymentPath":f"/pay/{public_token}","validFrom":now().isoformat(),"validUntil":(now()+timedelta(hours=2)).isoformat(),"subscriptionPlanId":p["_id"],"subscriptionPlanName":p["name"],"createdAt":now()}
+    iid=db().invoices.insert_one(inv).inserted_id
+    payment={"businessId":b["_id"],"invoiceId":iid,"amount":inv["amount"],"currency":inv["currency"],"phone":digits,"status":"PENDING","method":"M-Pesa STK","createdAt":now(),"publicPayment":True,"subscriptionPlanId":p["_id"],"subscriptionPlanName":p["name"]}
+    pid=db().payments.insert_one(payment).inserted_id
+    c=app.config;required=[c.get("DARAJA_CONSUMER_KEY"),c.get("DARAJA_CONSUMER_SECRET"),c.get("DARAJA_PASSKEY"),c.get("DARAJA_SHORTCODE"),c.get("DARAJA_CALLBACK_URL")]
+    if not all(required):
+        db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":"M-Pesa is temporarily unavailable. Use the payment link fallback below."}})
+        return jsonify(paymentId=str(pid),paymentUrl=f"/pay/{public_token}",fallback=True,message="M-Pesa STK is unavailable right now. You can continue with the secure invoice payment link."),200
+    try:
+        import requests as rq, base64 as b64
+        base=str(c.get("DARAJA_BASE_URL") or "https://api.safaricom.co.ke").rstrip("/")
+        auth_resp=rq.get(base+"/oauth/v1/generate?grant_type=client_credentials",auth=(c["DARAJA_CONSUMER_KEY"],c["DARAJA_CONSUMER_SECRET"]),timeout=20);auth_data=auth_resp.json() if auth_resp.content else {}
+        access=auth_data.get("access_token")
+        if auth_resp.status_code!=200 or not access:raise RuntimeError(auth_data.get("error_description") or auth_data.get("errorMessage") or f"HTTP {auth_resp.status_code}")
+        ts=datetime.now(ZoneInfo("Africa/Nairobi")).strftime("%Y%m%d%H%M%S");tx_type=c.get("DARAJA_TRANSACTION_TYPE") or ("CustomerBuyGoodsOnline" if c.get("DARAJA_TILL_NUMBER") else "CustomerPayBillOnline")
+        business_shortcode=(c.get("DARAJA_TILL_NUMBER") or c["DARAJA_SHORTCODE"]) if tx_type=="CustomerBuyGoodsOnline" else c["DARAJA_SHORTCODE"]
+        password=b64.b64encode((business_shortcode+c["DARAJA_PASSKEY"]+ts).encode()).decode();party_b=c.get("DARAJA_TILL_NUMBER") if tx_type=="CustomerBuyGoodsOnline" and c.get("DARAJA_TILL_NUMBER") else c["DARAJA_SHORTCODE"]
+        payload={"BusinessShortCode":business_shortcode,"Password":password,"Timestamp":ts,"TransactionType":tx_type,"Amount":max(1,int(round(inv["amount"]))),"PartyA":digits,"PartyB":party_b,"PhoneNumber":digits,"CallBackURL":c["DARAJA_CALLBACK_URL"],"AccountReference":number[:12],"TransactionDesc":f"{p['name']} subscription"[:13]}
+        r=rq.post(base+"/mpesa/stkpush/v1/processrequest",headers={"Authorization":"Bearer "+access,"Content-Type":"application/json"},json=payload,timeout=30);data=r.json() if r.content else {};checkout=data.get("CheckoutRequestID")
+        if r.status_code>=400 or str(data.get("ResponseCode","0"))!="0" or not checkout:raise RuntimeError(data.get("ResponseDescription") or data.get("errorMessage") or data.get("CustomerMessage") or f"HTTP {r.status_code}")
+        db().payments.update_one({"_id":pid},{"$set":{"checkoutRequestId":checkout,"merchantRequestId":data.get("MerchantRequestID"),"providerResponse":data}});audit(db(),str(u["_id"]),"SUBSCRIPTION_STK_INITIATED",str(pid),{"plan":p["name"]})
+        return jsonify(paymentId=str(pid),checkoutRequestId=checkout,paymentUrl=f"/pay/{public_token}",message=data.get("CustomerMessage") or "Check your phone for the M-Pesa prompt."),200
+    except Exception as e:
+        reason=str(e)[:300];db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":reason}});audit(db(),str(u["_id"]),"SUBSCRIPTION_STK_FAILED",str(pid),{"reason":reason})
+        return jsonify(paymentId=str(pid),paymentUrl=f"/pay/{public_token}",fallback=True,message="STK could not start. You can use the secure payment link instead.",detail=reason),200
 
 @app.get("/api/client/documents")
 def client_documents():
@@ -329,7 +380,7 @@ def client_invoice():
     customer=db().customers.find_one({"_id":oid(d.get("customerId")),"businessId":b["_id"]}) if d.get("customerId") else None
     recipient_email=(d.get("customerEmail") or (customer or {}).get("email") or "").strip().lower()
     valid_from=d.get("validFrom") or now().isoformat(); valid_until=d.get("validUntil") or (now()+timedelta(days=30)).isoformat()
-    x={"businessId":b["_id"],"number":number,"title":d.get("title","Invoice"),"description":d.get("description",""),"amount":amount,"currency":d.get("currency","KES"),"status":"UNPAID","customerId":oid(d.get("customerId")),"customerName":d.get("customerName") or (customer or {}).get("name",""),"customerEmail":recipient_email,"paymentEnabled":bool(d.get("paymentEnabled",True)),"paymentTokenHash":token_hash,"paymentPath":f"/pay/{public_token}","validFrom":valid_from,"validUntil":valid_until,"createdAt":now()}
+    x={"businessId":b["_id"],"number":number,"title":d.get("title","Invoice"),"description":d.get("description",""),"paymentPrompt":d.get("paymentPrompt",""),"amount":amount,"currency":d.get("currency","KES"),"status":"UNPAID","customerId":oid(d.get("customerId")),"customerName":d.get("customerName") or (customer or {}).get("name",""),"customerEmail":recipient_email,"paymentEnabled":bool(d.get("paymentEnabled",True)),"paymentTokenHash":token_hash,"paymentPath":f"/pay/{public_token}","validFrom":valid_from,"validUntil":valid_until,"createdAt":now()}
     iid=db().invoices.insert_one(x).inserted_id;public_url=f"/pay/{public_token}"
     audit(db(),str(u["_id"]),"INVOICE_CREATED",str(iid),{"paymentEnabled":x["paymentEnabled"]})
     return jsonify(invoice=clean({**x,"_id":iid,"paymentUrl":public_url})),201
@@ -339,7 +390,7 @@ def public_invoice(token):
     token_hash=hashlib.sha256(token.encode()).hexdigest();inv=db().invoices.find_one({"paymentTokenHash":token_hash,"paymentEnabled":True})
     if not inv:return jsonify(error="Invoice link is invalid or expired"),404
     business=db().businesses.find_one({"_id":inv["businessId"]})
-    return jsonify(invoice={"id":str(inv["_id"]),"number":inv.get("number"),"title":inv.get("title"),"description":inv.get("description",""),"amount":inv.get("amount",0),"currency":inv.get("currency","KES"),"status":inv.get("status"),"customerName":inv.get("customerName",""),"businessName":(business or {}).get("businessName","Business"),"createdAt":inv.get("createdAt"),"validFrom":inv.get("validFrom"),"validUntil":inv.get("validUntil")})
+    return jsonify(invoice={"id":str(inv["_id"]),"number":inv.get("number"),"title":inv.get("title"),"description":inv.get("description",""),"paymentPrompt":inv.get("paymentPrompt",""),"amount":inv.get("amount",0),"currency":inv.get("currency","KES"),"status":inv.get("status"),"customerName":inv.get("customerName",""),"businessName":(business or {}).get("businessName","Business"),"createdAt":inv.get("createdAt"),"validFrom":inv.get("validFrom"),"validUntil":inv.get("validUntil")})
 
 @app.post("/api/public/invoices/<token>/pay")
 def public_invoice_pay(token):
@@ -550,6 +601,11 @@ def mpesa_callback():
                 if inv:
                     if status=="PAID":
                         db().invoices.update_one({"_id":inv["_id"]},{"$set":{"status":"PAID","paidAt":now()}})
+                        if inv.get("subscriptionPlanId"):
+                            plan=db().plans.find_one({"_id":inv["subscriptionPlanId"]})
+                            if plan:
+                                db().subscriptions.update_one({"businessId":inv["businessId"]},{"$set":{"businessId":inv["businessId"],"planId":plan["_id"],"plan":plan.get("name"),"amount":plan.get("amount",0),"currency":plan.get("currency","KES"),"status":"ACTIVE","startsAt":now(),"endsAt":now()+timedelta(days=int(plan.get("days",30))),"paidInvoiceId":inv["_id"],"updatedAt":now()}},upsert=True)
+                                audit(db(),"DARaja","SUBSCRIPTION_ACTIVATED",str(inv["businessId"]),{"plan":plan.get("name")})
                         receipt,created=receipt_from_payment(inv,{**payment,**update,"method":"M-Pesa STK"})
                         if created:
                             verify_token=receipt.get("verifyToken","")
