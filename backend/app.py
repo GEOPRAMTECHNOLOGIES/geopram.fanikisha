@@ -6,7 +6,7 @@ from bson import ObjectId
 from .config import Config
 from .db import db, init_indexes
 from .security import hash_password, verify_password, token_for, read_token, encrypt_secret, decrypt_secret
-from .services import audit, send_email, document_pdf, openai_admin, whatsapp_send
+from .services import audit, send_email, document_pdf, receipt_pdf, qr_png, website_root_url, openai_admin, whatsapp_send
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -49,6 +49,29 @@ def list_collection(name, query=None, limit=100, sort=None):
     cur = c.find(query or {})
     if sort: cur = cur.sort(*sort)
     return [clean(x) for x in cur.limit(limit)]
+
+def receipt_from_payment(inv,payment):
+    existing=db().receipts.find_one({"invoiceId":inv["_id"]})
+    if existing:return existing,False
+    verify_token=secrets.token_urlsafe(28)
+    verify_hash=hashlib.sha256(verify_token.encode()).hexdigest()
+    verify_path=f"/verify/receipt/{verify_token}"
+    receipt={"businessId":inv["businessId"],"invoiceId":inv["_id"],"number":"RCT-"+secrets.token_hex(4).upper(),"amount":inv.get("amount",0),"currency":inv.get("currency","KES"),"status":"PAID","method":(payment or {}).get("method","M-Pesa STK"),"phone":(payment or {}).get("phone","") ,"mpesaReceiptNumber":(payment or {}).get("mpesaReceiptNumber","") ,"paidAt":(payment or {}).get("verifiedAt") or now(),"createdAt":now(),"verifyTokenHash":verify_hash,"verifyPath":verify_path}
+    rid=db().receipts.insert_one(receipt).inserted_id
+    receipt["_id"]=rid;receipt["verifyToken"]=verify_token;return receipt,True
+
+def receipt_verify_url(token):return request.host_url.rstrip("/")+f"/verify/receipt/{token}"
+
+def send_receipt_to_payer(inv,payment,receipt,verify_token):
+    email=(inv.get("customerEmail") or "").strip().lower()
+    if not email:return False,"No payer email was supplied on the invoice"
+    b=db().businesses.find_one({"_id":inv["businessId"]}) or {}
+    verify=receipt_verify_url(verify_token)
+    pdf=receipt_pdf({**receipt,"invoiceNumber":inv.get("number",""),"verifyUrl":verify},b.get("businessName","Business"))
+    html=f'<h2>Payment received</h2><p>Thank you. Your payment for <strong>{inv.get("number","Invoice")}</strong> was successful.</p><p>Amount: <strong>{inv.get("currency","KES")} {float(inv.get("amount",0)):,.2f}</strong></p><p>M-Pesa receipt: <strong>{receipt.get("mpesaReceiptNumber") or "—"}</strong></p><p><a href="{verify}">Verify receipt online</a></p>'
+    send_email(email,f'Payment receipt {receipt.get("number")}',html,[(receipt.get("number","receipt")+".pdf",pdf,"application/pdf")])
+    db().receipts.update_one({"_id":receipt["_id"]},{"$set":{"emailSentTo":email,"emailSentAt":now()}})
+    return True,email
 
 @app.get("/api/health")
 def health():
@@ -305,7 +328,8 @@ def client_invoice():
     public_token=secrets.token_urlsafe(28);token_hash=hashlib.sha256(public_token.encode()).hexdigest()
     customer=db().customers.find_one({"_id":oid(d.get("customerId")),"businessId":b["_id"]}) if d.get("customerId") else None
     recipient_email=(d.get("customerEmail") or (customer or {}).get("email") or "").strip().lower()
-    x={"businessId":b["_id"],"number":number,"title":d.get("title","Invoice"),"description":d.get("description",""),"amount":amount,"currency":d.get("currency","KES"),"status":"UNPAID","customerId":oid(d.get("customerId")),"customerName":d.get("customerName") or (customer or {}).get("name",""),"customerEmail":recipient_email,"paymentEnabled":bool(d.get("paymentEnabled",True)),"paymentTokenHash":token_hash,"paymentPath":f"/pay/{public_token}","createdAt":now()}
+    valid_from=d.get("validFrom") or now().isoformat(); valid_until=d.get("validUntil") or (now()+timedelta(days=30)).isoformat()
+    x={"businessId":b["_id"],"number":number,"title":d.get("title","Invoice"),"description":d.get("description",""),"amount":amount,"currency":d.get("currency","KES"),"status":"UNPAID","customerId":oid(d.get("customerId")),"customerName":d.get("customerName") or (customer or {}).get("name",""),"customerEmail":recipient_email,"paymentEnabled":bool(d.get("paymentEnabled",True)),"paymentTokenHash":token_hash,"paymentPath":f"/pay/{public_token}","validFrom":valid_from,"validUntil":valid_until,"createdAt":now()}
     iid=db().invoices.insert_one(x).inserted_id;public_url=f"/pay/{public_token}"
     audit(db(),str(u["_id"]),"INVOICE_CREATED",str(iid),{"paymentEnabled":x["paymentEnabled"]})
     return jsonify(invoice=clean({**x,"_id":iid,"paymentUrl":public_url})),201
@@ -315,13 +339,18 @@ def public_invoice(token):
     token_hash=hashlib.sha256(token.encode()).hexdigest();inv=db().invoices.find_one({"paymentTokenHash":token_hash,"paymentEnabled":True})
     if not inv:return jsonify(error="Invoice link is invalid or expired"),404
     business=db().businesses.find_one({"_id":inv["businessId"]})
-    return jsonify(invoice={"id":str(inv["_id"]),"number":inv.get("number"),"title":inv.get("title"),"description":inv.get("description",""),"amount":inv.get("amount",0),"currency":inv.get("currency","KES"),"status":inv.get("status"),"customerName":inv.get("customerName",""),"businessName":(business or {}).get("businessName","Business"),"createdAt":inv.get("createdAt")})
+    return jsonify(invoice={"id":str(inv["_id"]),"number":inv.get("number"),"title":inv.get("title"),"description":inv.get("description",""),"amount":inv.get("amount",0),"currency":inv.get("currency","KES"),"status":inv.get("status"),"customerName":inv.get("customerName",""),"businessName":(business or {}).get("businessName","Business"),"createdAt":inv.get("createdAt"),"validFrom":inv.get("validFrom"),"validUntil":inv.get("validUntil")})
 
 @app.post("/api/public/invoices/<token>/pay")
 def public_invoice_pay(token):
     token_hash=hashlib.sha256(token.encode()).hexdigest();inv=db().invoices.find_one({"paymentTokenHash":token_hash,"paymentEnabled":True})
     if not inv:return jsonify(error="Invoice link is invalid or expired"),404
     if inv.get("status") in {"PAID","CANCELLED"}:return jsonify(error=f"Invoice is already {inv.get('status').lower()}"),409
+    try:
+        current=now()
+        if inv.get("validFrom") and current < datetime.fromisoformat(str(inv["validFrom"]).replace("Z","+00:00")):return jsonify(error="This invoice is not yet valid"),409
+        if inv.get("validUntil") and current > datetime.fromisoformat(str(inv["validUntil"]).replace("Z","+00:00")):return jsonify(error="This invoice has expired"),409
+    except (TypeError,ValueError):pass
     d=json_body();phone=(d.get("phone") or "").strip();method=(d.get("method") or "M-Pesa STK").strip()
     if method=="M-Pesa STK":
         # Accept common Kenyan formats and always send 254XXXXXXXXX to Daraja.
@@ -383,7 +412,26 @@ def public_invoice_pay(token):
 def public_payment_status(pid):
     p=db().payments.find_one({"_id":oid(pid),"publicPayment":True})
     if not p:return jsonify(error="Payment not found"),404
-    return jsonify(payment={"id":str(p["_id"]),"status":p.get("status"),"amount":p.get("amount"),"currency":p.get("currency","KES"),"createdAt":p.get("createdAt")})
+    return jsonify(payment={"id":str(p["_id"]),"status":p.get("status"),"amount":p.get("amount"),"currency":p.get("currency","KES"),"createdAt":p.get("createdAt"),"updatedAt":p.get("verifiedAt") or p.get("updatedAt"),"failureReason":p.get("failureReason",""),"resultCode":p.get("resultCode"),"resultDescription":p.get("resultDescription",""),"mpesaReceiptNumber":p.get("mpesaReceiptNumber",""),"checkoutRequestId":p.get("checkoutRequestId","")})
+
+@app.get("/api/public/receipts/verify/<token>")
+def public_receipt_verify(token):
+    h=hashlib.sha256(token.encode()).hexdigest();r=db().receipts.find_one({"verifyTokenHash":h})
+    if not r:return jsonify(error="Receipt not found or verification link is invalid"),404
+    inv=db().invoices.find_one({"_id":r.get("invoiceId")});b=db().businesses.find_one({"_id":r.get("businessId")})
+    return jsonify(verified=True,receipt={"number":r.get("number"),"amount":r.get("amount"),"currency":r.get("currency","KES"),"status":r.get("status","PAID"),"method":r.get("method","M-Pesa STK"),"mpesaReceiptNumber":r.get("mpesaReceiptNumber",""),"paidAt":r.get("paidAt"),"invoiceNumber":(inv or {}).get("number",""),"businessName":(b or {}).get("businessName","Business")})
+
+@app.get("/api/public/receipts/verify/<token>/qr")
+def public_receipt_verify_qr(token):
+    h=hashlib.sha256(token.encode()).hexdigest();r=db().receipts.find_one({"verifyTokenHash":h})
+    if not r:return jsonify(error="Receipt not found"),404
+    png=qr_png(request.host_url.rstrip("/")+f"/verify/receipt/{token}");return Response(png,mimetype="image/png")
+
+@app.get("/api/public/receipts/verify/<token>/pdf")
+def public_receipt_verify_pdf(token):
+    h=hashlib.sha256(token.encode()).hexdigest();r=db().receipts.find_one({"verifyTokenHash":h})
+    if not r:return jsonify(error="Receipt not found"),404
+    inv=db().invoices.find_one({"_id":r.get("invoiceId")});b=db().businesses.find_one({"_id":r.get("businessId")}) or {};pdf=receipt_pdf({**r,"invoiceNumber":(inv or {}).get("number",""),"verifyUrl":request.host_url.rstrip("/")+f"/verify/receipt/{token}"},b.get("businessName","Business"));return Response(pdf,mimetype="application/pdf",headers={"Content-Disposition":f'inline; filename={r.get("number","receipt")}.pdf'})
 
 @app.post("/api/client/invoices/<iid>/send")
 def client_invoice_send(iid):
@@ -415,7 +463,7 @@ def client_invoice_paid(iid):
     if not u:return jsonify(error="Unauthorized"),401
     b=owner_business(u);r=db().invoices.update_one({"_id":oid(iid),"businessId":b["_id"]},{"$set":{"status":"PAID","paidAt":now()}})
     if not r.matched_count:return jsonify(error="Invoice not found"),404
-    inv=db().invoices.find_one({"_id":oid(iid)});rid=db().receipts.insert_one({"businessId":b["_id"],"invoiceId":inv["_id"],"number":"RCT-"+secrets.token_hex(4).upper(),"amount":inv.get("amount",0),"currency":inv.get("currency","KES"),"createdAt":now()}).inserted_id;audit(db(),str(u["_id"]),"RECEIPT_CREATED",str(rid));return jsonify(message="Invoice marked paid",receipt=str(rid))
+    inv=db().invoices.find_one({"_id":oid(iid)});receipt,created=receipt_from_payment(inv,{"method":"Manual payment","verifiedAt":now()});audit(db(),str(u["_id"]),"RECEIPT_CREATED",str(receipt["_id"]));return jsonify(message="Invoice marked paid",receipt=str(receipt["_id"]))
 
 
 @app.post("/api/auth/change-password")
@@ -478,16 +526,41 @@ def client_mpesa_stk():
 @app.post("/api/mpesa/callback")
 @app.post("/api/webhooks/daraja")
 def mpesa_callback():
-    payload=request.get_json(silent=True) or {};db().mpesa_callbacks.insert_one({"payload":payload,"createdAt":now()});cb=((payload.get("Body") or {}).get("stkCallback") or {});checkout=cb.get("CheckoutRequestID");status="PAID" if cb.get("ResultCode")==0 else "FAILED"
+    payload=request.get_json(silent=True) or {};db().mpesa_callbacks.insert_one({"payload":payload,"createdAt":now()})
+    cb=((payload.get("Body") or {}).get("stkCallback") or {});checkout=cb.get("CheckoutRequestID");raw_code=cb.get("ResultCode")
+    try:code=int(raw_code)
+    except (TypeError,ValueError):code=None
+    if code==0:status="PAID"
+    elif code==1032:status="CANCELLED"
+    else:status="FAILED"
+    metadata={}
+    for item in ((cb.get("CallbackMetadata") or {}).get("Item") or []):
+        if item.get("Name"):metadata[item["Name"]]=item.get("Value")
     if checkout:
         payment=db().payments.find_one({"checkoutRequestId":checkout})
-        db().payments.update_one({"checkoutRequestId":checkout},{"$set":{"status":status,"callback":payload,"verifiedAt":now()}})
-        if payment and payment.get("invoiceId"):
-            db().invoices.update_one({"_id":payment["invoiceId"]},{"$set":{"status":"PAID" if status=="PAID" else "UNPAID","paidAt":now() if status=="PAID" else None}})
-            if status=="PAID":
+        if payment:
+            update={"status":status,"callback":payload,"verifiedAt":now(),"resultCode":code,"resultDescription":cb.get("ResultDesc","")}
+            if metadata.get("MpesaReceiptNumber") is not None:update["mpesaReceiptNumber"]=str(metadata.get("MpesaReceiptNumber"))
+            if metadata.get("TransactionDate") is not None:update["transactionDate"]=str(metadata.get("TransactionDate"))
+            if metadata.get("PhoneNumber") is not None:update["paidPhone"]=str(metadata.get("PhoneNumber"))
+            if status!="PAID":update["failureReason"]=cb.get("ResultDesc","")
+            db().payments.update_one({"_id":payment["_id"]},{"$set":update})
+            if payment.get("invoiceId"):
                 inv=db().invoices.find_one({"_id":payment["invoiceId"]})
-                if inv and not db().receipts.find_one({"invoiceId":inv["_id"]}):
-                    db().receipts.insert_one({"businessId":inv["businessId"],"invoiceId":inv["_id"],"number":"RCT-"+secrets.token_hex(4).upper(),"amount":inv.get("amount",0),"currency":inv.get("currency","KES"),"createdAt":now()})
+                if inv:
+                    if status=="PAID":
+                        db().invoices.update_one({"_id":inv["_id"]},{"$set":{"status":"PAID","paidAt":now()}})
+                        receipt,created=receipt_from_payment(inv,{**payment,**update,"method":"M-Pesa STK"})
+                        if created:
+                            verify_token=receipt.get("verifyToken","")
+                            try:
+                                sent,detail=send_receipt_to_payer(inv,{**payment,**update},receipt,verify_token);db().receipts.update_one({"_id":receipt["_id"]},{"$set":{"emailStatus":"SENT" if sent else "NOT_SENT","emailDetail":detail}})
+                            except Exception as e:
+                                db().receipts.update_one({"_id":receipt["_id"]},{"$set":{"emailStatus":"FAILED","emailDetail":str(e)[:300]}});app.logger.exception("Receipt email failed for %s",receipt.get("number"))
+                            audit(db(),"DARaja","RECEIPT_CREATED",str(receipt["_id"]),{"invoiceId":str(inv["_id"]),"emailSent":bool(inv.get("customerEmail"))})
+                    else:
+                        db().invoices.update_one({"_id":inv["_id"]},{"$set":{"status":"UNPAID"}})
+            audit(db(),"DARaja","PAYMENT_CALLBACK",str(payment["_id"]),{"status":status,"resultCode":code,"checkoutRequestId":checkout})
     return jsonify(ResultCode=0,ResultDesc="Accepted")
 
 @app.get("/api/client/reports")
