@@ -152,11 +152,40 @@ def client_whatsapp_send():
     u=require_client()
     if not u:return jsonify(error="Unauthorized"),401
     b=owner_business(u);d=json_body();x=db().whatsapp_integrations.find_one({"businessId":b["_id"],"active":True}) if b else None
-    if not x:return jsonify(error="WhatsApp is not connected"),400
-    try: result=whatsapp_send({"accessToken":x["encryptedAccessToken"],"phoneNumberId":x["phoneNumberId"]},d.get("to",""),d.get("text",""))
-    except Exception as e:return jsonify(error=f"WhatsApp send failed: {e}"),502
+    if not x:return jsonify(error="WhatsApp is not connected. Save and test the WhatsApp connection first."),400
+    phone=(d.get("to") or "").strip(); text=(d.get("text") or "").strip()
+    digits="".join(ch for ch in phone if ch.isdigit())
+    if digits.startswith("0") and len(digits)==10: digits="254"+digits[1:]
+    elif digits.startswith("254") and len(digits)==12: pass
+    else:return jsonify(error="Enter a valid Kenyan customer number, e.g. 0712345678 or 254712345678"),400
+    if not text:return jsonify(error="Enter a message before sending"),400
+    try: result=whatsapp_send({"accessToken":x["encryptedAccessToken"],"phoneNumberId":x["phoneNumberId"]},digits,text)
+    except Exception as e:
+        reason=str(e)[:400];audit(db(),str(u["_id"]),"WHATSAPP_MESSAGE_FAILED",str(b["_id"]),{"reason":reason});return jsonify(error=f"WhatsApp send failed: {reason}"),502
     msgid=result.get("messages",[{}])[0].get("id") if isinstance(result,dict) else None
-    db().messages.insert_one({"businessId":b["_id"],"direction":"OUTBOUND","to":d.get("to",""),"text":d.get("text",""),"status":"SENT","providerId":msgid,"createdAt":now()});audit(db(),str(u["_id"]),"WHATSAPP_MESSAGE_SENT",str(b["_id"]));return jsonify(message="Message sent",provider=result)
+    db().messages.insert_one({"businessId":b["_id"],"direction":"OUTBOUND","to":digits,"text":text,"status":"SENT","providerId":msgid,"createdAt":now()});audit(db(),str(u["_id"]),"WHATSAPP_MESSAGE_SENT",str(b["_id"]));return jsonify(message="Message sent",provider=result)
+
+@app.post("/api/client/whatsapp/test")
+def client_whatsapp_test():
+    u=require_client()
+    if not u:return jsonify(error="Unauthorized"),401
+    b=owner_business(u);x=db().whatsapp_integrations.find_one({"businessId":b["_id"]}) if b else None
+    if not x:return jsonify(error="Save the WhatsApp connection details first"),400
+    try:
+        import requests as rq
+        from .security import decrypt_secret
+        token=decrypt_secret(x["encryptedAccessToken"])
+        r=rq.get(f"https://graph.facebook.com/v23.0/{x['phoneNumberId']}",params={"fields":"display_phone_number,verified_name,id"},headers={"Authorization":f"Bearer {token}"},timeout=20)
+        data=r.json() if r.content else {}
+        if r.status_code>=400:
+            reason=data.get("error",{}).get("message") or data.get("error_description") or f"Meta returned HTTP {r.status_code}"
+            db().whatsapp_integrations.update_one({"_id":x["_id"]},{"$set":{"active":False,"webhookVerified":False,"lastError":reason,"updatedAt":now()}})
+            return jsonify(error=f"Meta connection test failed: {reason}"),502
+        db().whatsapp_integrations.update_one({"_id":x["_id"]},{"$set":{"active":True,"lastError":"","verifiedName":data.get("verified_name"),"displayPhoneNumber":data.get("display_phone_number"),"updatedAt":now()}})
+        audit(db(),str(u["_id"]),"WHATSAPP_CONNECTION_TESTED",str(b["_id"]),{"phoneNumberId":x.get("phoneNumberId")})
+        return jsonify(message="WhatsApp connection verified",details={"verifiedName":data.get("verified_name"),"displayPhoneNumber":data.get("display_phone_number"),"phoneNumberId":data.get("id")})
+    except Exception as e:
+        reason=str(e)[:400];return jsonify(error=f"Unable to test WhatsApp connection: {reason}"),502
 
 @app.get("/api/client/conversations")
 def conversations():
@@ -293,23 +322,54 @@ def public_invoice_pay(token):
     if not inv:return jsonify(error="Invoice link is invalid or expired"),404
     if inv.get("status") in {"PAID","CANCELLED"}:return jsonify(error=f"Invoice is already {inv.get('status').lower()}"),409
     d=json_body();phone=(d.get("phone") or "").strip();method=(d.get("method") or "M-Pesa STK").strip()
-    if method=="M-Pesa STK" and not phone:return jsonify(error="Enter a Kenyan mobile number for M-Pesa STK"),400
+    if method=="M-Pesa STK":
+        # Accept common Kenyan formats and always send 254XXXXXXXXX to Daraja.
+        digits="".join(ch for ch in phone if ch.isdigit())
+        if digits.startswith("0") and len(digits)==10: digits="254"+digits[1:]
+        elif digits.startswith("254") and len(digits)==12: pass
+        elif phone.startswith("+") and len(digits)==12: pass
+        else: return jsonify(error="Enter a valid Kenyan mobile number, e.g. 0712345678 or 254712345678"),400
+        phone=digits
     payment={"businessId":inv["businessId"],"invoiceId":inv["_id"],"amount":inv["amount"],"currency":inv.get("currency","KES"),"phone":phone,"status":"PENDING","method":method,"createdAt":now(),"publicPayment":True}
     pid=db().payments.insert_one(payment).inserted_id
     if method=="M-Pesa STK":
         c=app.config
-        if not all([c.get("DARAJA_CONSUMER_KEY"),c.get("DARAJA_CONSUMER_SECRET"),c.get("DARAJA_PASSKEY"),c.get("DARAJA_SHORTCODE"),c.get("DARAJA_CALLBACK_URL")]):
-            db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":"Daraja is not configured"}});return jsonify(error="M-Pesa payment is not configured by this business yet"),503
+        required=[c.get("DARAJA_CONSUMER_KEY"),c.get("DARAJA_CONSUMER_SECRET"),c.get("DARAJA_PASSKEY"),c.get("DARAJA_SHORTCODE"),c.get("DARAJA_CALLBACK_URL")]
+        if not all(required):
+            db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":"Daraja is not configured"}})
+            return jsonify(error="M-Pesa payment is not configured by this business yet"),503
         try:
             import requests as rq, base64 as b64
-            token_resp=rq.get(c["DARAJA_BASE_URL"]+"/oauth/v1/generate?grant_type=client_credentials",auth=(c["DARAJA_CONSUMER_KEY"],c["DARAJA_CONSUMER_SECRET"]),timeout=20).json()
-            access=token_resp["access_token"];ts=now().strftime("%Y%m%d%H%M%S");password=b64.b64encode((c["DARAJA_SHORTCODE"]+c["DARAJA_PASSKEY"]+ts).encode()).decode()
-            payload={"BusinessShortCode":c["DARAJA_SHORTCODE"],"Password":password,"Timestamp":ts,"TransactionType":c.get("DARAJA_TRANSACTION_TYPE") or "CustomerPayBillOnline","Amount":int(inv["amount"]),"PartyA":phone,"PartyB":c["DARAJA_SHORTCODE"],"PhoneNumber":phone,"CallBackURL":c["DARAJA_CALLBACK_URL"],"AccountReference":inv.get("number","Invoice"),"TransactionDesc":inv.get("title","Invoice payment")[:20]}
-            r=rq.post(c["DARAJA_BASE_URL"]+"/mpesa/stkpush/v1/processrequest",headers={"Authorization":"Bearer "+access},json=payload,timeout=30);data=r.json();checkout=data.get("CheckoutRequestID")
-            db().payments.update_one({"_id":pid},{"$set":{"checkoutRequestId":checkout,"merchantRequestId":data.get("MerchantRequestID"),"providerResponse":data}});audit(db(),"PUBLIC","PAYMENT_STK_INITIATED",str(pid),{"invoiceId":str(inv["_id"])})
+            base=str(c.get("DARAJA_BASE_URL") or "https://api.safaricom.co.ke").rstrip("/")
+            auth_resp=rq.get(base+"/oauth/v1/generate?grant_type=client_credentials",auth=(c["DARAJA_CONSUMER_KEY"],c["DARAJA_CONSUMER_SECRET"]),timeout=20)
+            try: auth_data=auth_resp.json()
+            except Exception: auth_data={}
+            access=auth_data.get("access_token")
+            if auth_resp.status_code != 200 or not access:
+                reason=auth_data.get("error_description") or auth_data.get("errorMessage") or f"HTTP {auth_resp.status_code}"
+                raise RuntimeError(f"Daraja authentication failed: {reason}")
+            ts=now().strftime("%Y%m%d%H%M%S");password=b64.b64encode((c["DARAJA_SHORTCODE"]+c["DARAJA_PASSKEY"]+ts).encode()).decode()
+            tx_type=c.get("DARAJA_TRANSACTION_TYPE") or "CustomerPayBillOnline"
+            party_b=c.get("DARAJA_TILL_NUMBER") if tx_type=="CustomerBuyGoodsOnline" and c.get("DARAJA_TILL_NUMBER") else c["DARAJA_SHORTCODE"]
+            payload={"BusinessShortCode":c["DARAJA_SHORTCODE"],"Password":password,"Timestamp":ts,"TransactionType":tx_type,"Amount":max(1,int(round(float(inv["amount"])))),"PartyA":phone,"PartyB":party_b,"PhoneNumber":phone,"CallBackURL":c["DARAJA_CALLBACK_URL"],"AccountReference":inv.get("number","Invoice")[:20],"TransactionDesc":inv.get("title","Invoice payment")[:20]}
+            r=rq.post(base+"/mpesa/stkpush/v1/processrequest",headers={"Authorization":"Bearer "+access,"Content-Type":"application/json"},json=payload,timeout=30)
+            try: data=r.json()
+            except Exception: data={}
+            response_code=str(data.get("ResponseCode", ""))
+            checkout=data.get("CheckoutRequestID")
+            if r.status_code >= 400 or (response_code and response_code != "0") or not checkout:
+                reason=data.get("ResponseDescription") or data.get("errorMessage") or data.get("CustomerMessage") or f"HTTP {r.status_code}"
+                db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":reason,"providerResponse":data}})
+                audit(db(),"PUBLIC","PAYMENT_STK_FAILED",str(pid),{"invoiceId":str(inv["_id"]),"reason":str(reason)[:200]})
+                return jsonify(error=f"M-Pesa could not start the payment: {reason}"),502
+            db().payments.update_one({"_id":pid},{"$set":{"checkoutRequestId":checkout,"merchantRequestId":data.get("MerchantRequestID"),"providerResponse":data}})
+            audit(db(),"PUBLIC","PAYMENT_STK_INITIATED",str(pid),{"invoiceId":str(inv["_id"])})
             return jsonify(message=data.get("CustomerMessage") or "Check your phone for the M-Pesa prompt",paymentId=str(pid),checkoutRequestId=checkout),200
-        except Exception:
-            db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":"Daraja request failed"}});return jsonify(error="Unable to start M-Pesa payment"),502
+        except Exception as e:
+            reason=str(e)[:300]
+            db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":reason}})
+            audit(db(),"PUBLIC","PAYMENT_STK_FAILED",str(pid),{"invoiceId":str(inv["_id"]),"reason":reason})
+            return jsonify(error="Unable to start M-Pesa payment",detail=reason),502
     audit(db(),"PUBLIC","PAYMENT_CREATED",str(pid),{"invoiceId":str(inv["_id"])})
     return jsonify(message="Payment request recorded",paymentId=str(pid)),201
 
@@ -407,6 +467,7 @@ def client_mpesa_stk():
     pid=db().payments.insert_one({"businessId":b["_id"],"amount":amount,"currency":"KES","phone":phone,"status":"PENDING","method":"M-Pesa STK","checkoutRequestId":data.get("CheckoutRequestID"),"merchantRequestId":data.get("MerchantRequestID"),"createdAt":now()}).inserted_id;audit(db(),str(u["_id"]),"PAYMENT_STK_INITIATED",str(pid));return jsonify(message=data.get("CustomerMessage") or "STK push initiated",payment=clean({"_id":pid,**data}))
 
 @app.post("/api/mpesa/callback")
+@app.post("/api/webhooks/daraja")
 def mpesa_callback():
     payload=request.get_json(silent=True) or {};db().mpesa_callbacks.insert_one({"payload":payload,"createdAt":now()});cb=((payload.get("Body") or {}).get("stkCallback") or {});checkout=cb.get("CheckoutRequestID");status="PAID" if cb.get("ResultCode")==0 else "FAILED"
     if checkout:
