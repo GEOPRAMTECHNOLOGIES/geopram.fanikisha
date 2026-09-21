@@ -62,6 +62,102 @@ def receipt_from_payment(inv,payment):
 
 def receipt_verify_url(token):return request.host_url.rstrip("/")+f"/verify/receipt/{token}"
 
+
+class DarajaSTKError(RuntimeError):
+    def __init__(self, message, *, code=None, http_status=None, response=None):
+        super().__init__(message)
+        self.message=str(message)
+        self.code=str(code) if code not in (None, "") else None
+        self.http_status=http_status
+        self.response=response if isinstance(response, dict) else {}
+
+
+def daraja_stk_push(phone, amount, reference, description):
+    """Start an STK Push using the same Daraja construction as the working GLDC app.
+
+    Important: keep the Daraja Short Code separate from the receiving Till.
+    For CustomerBuyGoodsOnline, the working integration uses:
+      BusinessShortCode = DARAJA_SHORTCODE
+      PartyB            = DARAJA_TILL_NUMBER
+      PartyA/PhoneNumber= customer MSISDN
+    The password is also built from the Short Code, passkey and Nairobi timestamp.
+    """
+    import requests as rq
+    customer="".join(ch for ch in str(phone or "") if ch.isdigit())
+    if customer.startswith("0") and len(customer)==10:
+        customer="254"+customer[1:]
+    elif customer.startswith("+"):
+        customer=customer[1:]
+    if not re.fullmatch(r"254[17]\d{8}", customer):
+        raise DarajaSTKError("Enter a valid Kenyan mobile number, e.g. 0712345678 or 254712345678.", code="INVALID_MPESA_PHONE")
+    try:
+        amount_int=int(round(float(amount)))
+    except (TypeError, ValueError):
+        amount_int=0
+    if amount_int < 1:
+        raise DarajaSTKError("Payment amount must be at least KES 1.", code="INVALID_PAYMENT_AMOUNT")
+
+    c=app.config
+    base=str(c.get("DARAJA_BASE_URL") or "https://api.safaricom.co.ke").rstrip("/")
+    key=str(c.get("DARAJA_CONSUMER_KEY") or "").strip()
+    secret=str(c.get("DARAJA_CONSUMER_SECRET") or "").strip()
+    passkey=str(c.get("DARAJA_PASSKEY") or "").strip()
+    short=str(c.get("DARAJA_SHORTCODE") or "").strip()
+    till=str(c.get("DARAJA_TILL_NUMBER") or "").strip()
+    callback=str(c.get("DARAJA_CALLBACK_URL") or "").strip()
+    tx_type=str(c.get("DARAJA_TRANSACTION_TYPE") or ("CustomerBuyGoodsOnline" if till else "CustomerPayBillOnline")).strip()
+    missing=[]
+    for label,value in (("DARAJA_CONSUMER_KEY",key),("DARAJA_CONSUMER_SECRET",secret),("DARAJA_PASSKEY",passkey),("DARAJA_SHORTCODE",short),("DARAJA_CALLBACK_URL",callback)):
+        if not value: missing.append(label)
+    if tx_type=="CustomerBuyGoodsOnline" and not till: missing.append("DARAJA_TILL_NUMBER")
+    if missing:
+        raise DarajaSTKError("Daraja is not fully configured: "+", ".join(missing), code="DARAJA_CONFIG_MISSING")
+
+    try:
+        auth_resp=rq.get(base+"/oauth/v1/generate?grant_type=client_credentials",auth=(key,secret),timeout=20)
+        try: auth_data=auth_resp.json()
+        except Exception: auth_data={}
+    except Exception as exc:
+        raise DarajaSTKError(f"Daraja authentication request failed: {exc}", code="DARAJA_AUTH_REQUEST_FAILED") from exc
+    access=auth_data.get("access_token")
+    if auth_resp.status_code != 200 or not access:
+        reason=auth_data.get("error_description") or auth_data.get("errorMessage") or auth_data.get("errorCode") or f"HTTP {auth_resp.status_code}"
+        raise DarajaSTKError(f"Daraja authentication failed: {reason}",code=auth_data.get("errorCode") or "DARAJA_AUTH_FAILED",http_status=auth_resp.status_code,response=auth_data)
+
+    # Match the known-working integration: timestamp is Nairobi/East Africa time,
+    # BusinessShortCode and password use the configured Short Code, while Buy Goods
+    # sends the receiving Till as PartyB.
+    ts=datetime.now(ZoneInfo("Africa/Nairobi")).strftime("%Y%m%d%H%M%S")
+    business_shortcode=short
+    password=base64.b64encode((business_shortcode+passkey+ts).encode()).decode()
+    party_b=till if tx_type=="CustomerBuyGoodsOnline" and till else short
+    payload={
+        "BusinessShortCode":business_shortcode,
+        "Password":password,
+        "Timestamp":ts,
+        "TransactionType":tx_type,
+        "Amount":amount_int,
+        "PartyA":customer,
+        "PartyB":party_b,
+        "PhoneNumber":customer,
+        "CallBackURL":callback,
+        "AccountReference":str(reference or "Invoice")[:12],
+        "TransactionDesc":str(description or "Payment")[:13],
+    }
+    try:
+        r=rq.post(base+"/mpesa/stkpush/v1/processrequest",headers={"Authorization":"Bearer "+access,"Content-Type":"application/json"},json=payload,timeout=30)
+        try: data=r.json()
+        except Exception: data={}
+    except Exception as exc:
+        raise DarajaSTKError(f"Daraja STK request failed: {exc}",code="DARAJA_STK_REQUEST_FAILED") from exc
+
+    response_code=data.get("ResponseCode")
+    checkout=data.get("CheckoutRequestID")
+    if r.status_code >= 400 or (response_code is not None and str(response_code)!="0") or not checkout:
+        reason=data.get("ResponseDescription") or data.get("errorMessage") or data.get("error_description") or data.get("CustomerMessage") or data.get("errorCode") or f"HTTP {r.status_code}"
+        raise DarajaSTKError(str(reason),code=data.get("errorCode") or response_code or "DARAJA_STK_FAILED",http_status=r.status_code,response=data)
+    return data
+
 def send_receipt_to_payer(inv,payment,receipt,verify_token):
     email=(inv.get("customerEmail") or "").strip().lower()
     if not email:return False,"No payer email was supplied on the invoice"
@@ -342,22 +438,16 @@ def client_subscription_checkout():
         db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":"M-Pesa is temporarily unavailable. Use the payment link fallback below."}})
         return jsonify(paymentId=str(pid),paymentUrl=f"/pay/{public_token}",fallback=True,message="M-Pesa STK is unavailable right now. You can continue with the secure invoice payment link."),200
     try:
-        import requests as rq, base64 as b64
-        base=str(c.get("DARAJA_BASE_URL") or "https://api.safaricom.co.ke").rstrip("/")
-        auth_resp=rq.get(base+"/oauth/v1/generate?grant_type=client_credentials",auth=(c["DARAJA_CONSUMER_KEY"],c["DARAJA_CONSUMER_SECRET"]),timeout=20);auth_data=auth_resp.json() if auth_resp.content else {}
-        access=auth_data.get("access_token")
-        if auth_resp.status_code!=200 or not access:raise RuntimeError(auth_data.get("error_description") or auth_data.get("errorMessage") or f"HTTP {auth_resp.status_code}")
-        ts=datetime.now(ZoneInfo("Africa/Nairobi")).strftime("%Y%m%d%H%M%S");tx_type=c.get("DARAJA_TRANSACTION_TYPE") or ("CustomerBuyGoodsOnline" if c.get("DARAJA_TILL_NUMBER") else "CustomerPayBillOnline")
-        business_shortcode=(c.get("DARAJA_TILL_NUMBER") or c["DARAJA_SHORTCODE"]) if tx_type=="CustomerBuyGoodsOnline" else c["DARAJA_SHORTCODE"]
-        password=b64.b64encode((business_shortcode+c["DARAJA_PASSKEY"]+ts).encode()).decode();party_b=c.get("DARAJA_TILL_NUMBER") if tx_type=="CustomerBuyGoodsOnline" and c.get("DARAJA_TILL_NUMBER") else c["DARAJA_SHORTCODE"]
-        payload={"BusinessShortCode":business_shortcode,"Password":password,"Timestamp":ts,"TransactionType":tx_type,"Amount":max(1,int(round(inv["amount"]))),"PartyA":digits,"PartyB":party_b,"PhoneNumber":digits,"CallBackURL":c["DARAJA_CALLBACK_URL"],"AccountReference":number[:12],"TransactionDesc":f"{p['name']} subscription"[:13]}
-        r=rq.post(base+"/mpesa/stkpush/v1/processrequest",headers={"Authorization":"Bearer "+access,"Content-Type":"application/json"},json=payload,timeout=30);data=r.json() if r.content else {};checkout=data.get("CheckoutRequestID")
-        if r.status_code>=400 or str(data.get("ResponseCode","0"))!="0" or not checkout:raise RuntimeError(data.get("ResponseDescription") or data.get("errorMessage") or data.get("CustomerMessage") or f"HTTP {r.status_code}")
-        db().payments.update_one({"_id":pid},{"$set":{"checkoutRequestId":checkout,"merchantRequestId":data.get("MerchantRequestID"),"providerResponse":data}});audit(db(),str(u["_id"]),"SUBSCRIPTION_STK_INITIATED",str(pid),{"plan":p["name"]})
-        return jsonify(paymentId=str(pid),checkoutRequestId=checkout,paymentUrl=f"/pay/{public_token}",message=data.get("CustomerMessage") or "Check your phone for the M-Pesa prompt."),200
+        r=daraja_stk_push(digits,inv["amount"],number,f"{p['name']} subscription")
+        db().payments.update_one({"_id":pid},{"$set":{"checkoutRequestId":r.get("CheckoutRequestID"),"merchantRequestId":r.get("MerchantRequestID"),"providerResponse":r,"providerStatusCode":200}});audit(db(),str(u["_id"]),"SUBSCRIPTION_STK_INITIATED",str(pid),{"plan":p["name"]})
+        return jsonify(paymentId=str(pid),checkoutRequestId=r.get("CheckoutRequestID"),paymentUrl=f"/pay/{public_token}",message=r.get("CustomerMessage") or "Check your phone for the M-Pesa prompt."),200
+    except DarajaSTKError as e:
+        reason=e.message[:500]
+        db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":reason,"darajaError":reason,"darajaErrorCode":e.code,"providerStatusCode":e.http_status,"providerResponse":e.response,"failedAt":now()}})
+        audit(db(),str(u["_id"]),"SUBSCRIPTION_STK_FAILED",str(pid),{"reason":reason,"darajaErrorCode":e.code,"httpStatus":e.http_status})
+        return jsonify(paymentId=str(pid),paymentUrl=f"/pay/{public_token}",fallback=True,message="M-Pesa could not start. Use the secure payment link below or retry after checking the Daraja configuration.",detail=reason,darajaError=reason,darajaErrorCode=e.code,retryable=True),200
     except Exception as e:
-        reason=str(e)[:300];db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":reason}});audit(db(),str(u["_id"]),"SUBSCRIPTION_STK_FAILED",str(pid),{"reason":reason})
-        return jsonify(paymentId=str(pid),paymentUrl=f"/pay/{public_token}",fallback=True,message="STK could not start. You can use the secure payment link instead.",detail=reason),200
+        reason=str(e)[:500];db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":reason,"darajaError":reason,"failedAt":now()}});audit(db(),str(u["_id"]),"SUBSCRIPTION_STK_FAILED",str(pid),{"reason":reason});return jsonify(paymentId=str(pid),paymentUrl=f"/pay/{public_token}",fallback=True,message="M-Pesa could not start. Use the secure payment link below or retry.",detail=reason,retryable=True),200
 
 @app.get("/api/client/documents")
 def client_documents():
@@ -420,44 +510,24 @@ def public_invoice_pay(token):
             db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":"Daraja is not configured"}})
             return jsonify(error="M-Pesa payment is not configured by this business yet"),503
         try:
-            import requests as rq, base64 as b64
-            base=str(c.get("DARAJA_BASE_URL") or "https://api.safaricom.co.ke").rstrip("/")
-            auth_resp=rq.get(base+"/oauth/v1/generate?grant_type=client_credentials",auth=(c["DARAJA_CONSUMER_KEY"],c["DARAJA_CONSUMER_SECRET"]),timeout=20)
-            try: auth_data=auth_resp.json()
-            except Exception: auth_data={}
-            access=auth_data.get("access_token")
-            if auth_resp.status_code != 200 or not access:
-                reason=auth_data.get("error_description") or auth_data.get("errorMessage") or f"HTTP {auth_resp.status_code}"
-                raise RuntimeError(f"Daraja authentication failed: {reason}")
-            # Daraja expects the STK timestamp in Kenya/East Africa time, not UTC.
-            ts=datetime.now(ZoneInfo("Africa/Nairobi")).strftime("%Y%m%d%H%M%S")
-            tx_type=c.get("DARAJA_TRANSACTION_TYPE") or ("CustomerBuyGoodsOnline" if c.get("DARAJA_TILL_NUMBER") else "CustomerPayBillOnline")
-            business_shortcode=(c.get("DARAJA_TILL_NUMBER") or c["DARAJA_SHORTCODE"]) if tx_type=="CustomerBuyGoodsOnline" else c["DARAJA_SHORTCODE"]
-            password=b64.b64encode((business_shortcode+c["DARAJA_PASSKEY"]+ts).encode()).decode()
-            party_b=c.get("DARAJA_TILL_NUMBER") if tx_type=="CustomerBuyGoodsOnline" and c.get("DARAJA_TILL_NUMBER") else c["DARAJA_SHORTCODE"]
-            payload={"BusinessShortCode":business_shortcode,"Password":password,"Timestamp":ts,"TransactionType":tx_type,"Amount":max(1,int(round(float(inv["amount"])))),"PartyA":phone,"PartyB":party_b,"PhoneNumber":phone,"CallBackURL":c["DARAJA_CALLBACK_URL"],"AccountReference":str(inv.get("number","Invoice"))[:12],"TransactionDesc":str(inv.get("title","Invoice payment"))[:13]}
-            r=rq.post(base+"/mpesa/stkpush/v1/processrequest",headers={"Authorization":"Bearer "+access,"Content-Type":"application/json"},json=payload,timeout=30)
-            try: data=r.json()
-            except Exception: data={}
-            response_code=str(data.get("ResponseCode", ""))
-            checkout=data.get("CheckoutRequestID")
-            if r.status_code >= 400 or (response_code and response_code != "0") or not checkout:
-                reason=data.get("ResponseDescription") or data.get("errorMessage") or data.get("CustomerMessage") or f"HTTP {r.status_code}"
-                exact_error=str(reason)[:500]
-                update={"status":"FAILED","failureReason":exact_error,"providerResponse":data,"providerStatusCode":r.status_code,"darajaErrorCode":response_code or None,"darajaError":exact_error,"failedAt":now()}
-                db().payments.update_one({"_id":pid},{"$set":update})
-                app.logger.error("Daraja STK rejected invoice payment: status=%s response=%s", r.status_code, data)
-                audit(db(),"PUBLIC","PAYMENT_STK_FAILED",str(pid),{"invoiceId":str(inv["_id"]),"reason":exact_error,"darajaErrorCode":response_code or None,"httpStatus":r.status_code})
-                return jsonify(error=f"M-Pesa could not start the payment: {exact_error}",darajaError=exact_error,darajaErrorCode=response_code or None,retryable=True,fallbackPaymentUrl=f"/pay/{token}"),502
-            db().payments.update_one({"_id":pid},{"$set":{"checkoutRequestId":checkout,"merchantRequestId":data.get("MerchantRequestID"),"providerResponse":data,"providerStatusCode":r.status_code}})
+            data=daraja_stk_push(phone,inv["amount"],str(inv.get("number","Invoice")),str(inv.get("title","Invoice payment")))
+            db().payments.update_one({"_id":pid},{"$set":{"checkoutRequestId":data.get("CheckoutRequestID"),"merchantRequestId":data.get("MerchantRequestID"),"providerResponse":data,"providerStatusCode":200}})
             audit(db(),"PUBLIC","PAYMENT_STK_INITIATED",str(pid),{"invoiceId":str(inv["_id"])})
-            return jsonify(message=data.get("CustomerMessage") or "Check your phone for the M-Pesa prompt",paymentId=str(pid),checkoutRequestId=checkout),200
+            return jsonify(message=data.get("CustomerMessage") or "Check your phone for the M-Pesa prompt",paymentId=str(pid),checkoutRequestId=data.get("CheckoutRequestID")),200
+        except DarajaSTKError as e:
+            exact_error=e.message[:500]
+            update={"status":"FAILED","failureReason":exact_error,"providerResponse":e.response,"providerStatusCode":e.http_status,"darajaErrorCode":e.code,"darajaError":exact_error,"failedAt":now()}
+            db().payments.update_one({"_id":pid},{"$set":update})
+            app.logger.error("Daraja STK rejected invoice payment: code=%s status=%s response=%s",e.code,e.http_status,e.response)
+            audit(db(),"PUBLIC","PAYMENT_STK_FAILED",str(pid),{"invoiceId":str(inv["_id"]),"reason":exact_error,"darajaErrorCode":e.code,"httpStatus":e.http_status})
+            return jsonify(error=f"M-Pesa could not start the payment: {exact_error}",detail=exact_error,darajaError=exact_error,darajaErrorCode=e.code,retryable=True,fallbackPaymentUrl=f"/pay/{token}"),502
         except Exception as e:
             reason=str(e)[:500]
             db().payments.update_one({"_id":pid},{"$set":{"status":"FAILED","failureReason":reason,"darajaError":reason,"failedAt":now()}})
             app.logger.exception("Daraja STK exception for invoice payment: %s", reason)
             audit(db(),"PUBLIC","PAYMENT_STK_FAILED",str(pid),{"invoiceId":str(inv["_id"]),"reason":reason})
             return jsonify(error="Unable to start M-Pesa payment",detail=reason,darajaError=reason,retryable=True,fallbackPaymentUrl=f"/pay/{token}"),502
+
     audit(db(),"PUBLIC","PAYMENT_CREATED",str(pid),{"invoiceId":str(inv["_id"])})
     return jsonify(message="Payment request recorded",paymentId=str(pid)),201
 
@@ -465,7 +535,7 @@ def public_invoice_pay(token):
 def public_payment_status(pid):
     p=db().payments.find_one({"_id":oid(pid),"publicPayment":True})
     if not p:return jsonify(error="Payment not found"),404
-    return jsonify(payment={"id":str(p["_id"]),"status":p.get("status"),"amount":p.get("amount"),"currency":p.get("currency","KES"),"createdAt":p.get("createdAt"),"updatedAt":p.get("verifiedAt") or p.get("updatedAt"),"failureReason":p.get("failureReason",""),"resultCode":p.get("resultCode"),"resultDescription":p.get("resultDescription",""),"mpesaReceiptNumber":p.get("mpesaReceiptNumber",""),"checkoutRequestId":p.get("checkoutRequestId","")})
+    return jsonify(payment={"id":str(p["_id"]),"status":p.get("status"),"amount":p.get("amount"),"currency":p.get("currency","KES"),"createdAt":p.get("createdAt"),"updatedAt":p.get("verifiedAt") or p.get("updatedAt"),"failureReason":p.get("failureReason") or p.get("darajaError") or "","darajaError":p.get("darajaError") or "","darajaErrorCode":p.get("darajaErrorCode") or p.get("resultCode"),"resultCode":p.get("resultCode"),"resultDescription":p.get("resultDescription",""),"mpesaReceiptNumber":p.get("mpesaReceiptNumber",""),"checkoutRequestId":p.get("checkoutRequestId","")})
 
 @app.get("/api/public/receipts/verify/<token>")
 def public_receipt_verify(token):
@@ -565,16 +635,25 @@ def client_mpesa_stk():
     c=app.config
     if not all([c.get("DARAJA_CONSUMER_KEY"),c.get("DARAJA_CONSUMER_SECRET"),c.get("DARAJA_PASSKEY"),c.get("DARAJA_SHORTCODE"),c.get("DARAJA_CALLBACK_URL")]):return jsonify(error="Daraja is not fully configured in the environment"),400
     try:
-        import requests as rq, base64 as b64
-        token=rq.get(c["DARAJA_BASE_URL"]+"/oauth/v1/generate?grant_type=client_credentials",auth=(c["DARAJA_CONSUMER_KEY"],c["DARAJA_CONSUMER_SECRET"]),timeout=20).json()["access_token"]
-        ts=datetime.now(ZoneInfo("Africa/Nairobi")).strftime("%Y%m%d%H%M%S")
-        tx_type=c.get("DARAJA_TRANSACTION_TYPE") or ("CustomerBuyGoodsOnline" if c.get("DARAJA_TILL_NUMBER") else "CustomerPayBillOnline")
-        business_shortcode=(c.get("DARAJA_TILL_NUMBER") or c["DARAJA_SHORTCODE"]) if tx_type=="CustomerBuyGoodsOnline" else c["DARAJA_SHORTCODE"]
-        password=b64.b64encode((business_shortcode+c["DARAJA_PASSKEY"]+ts).encode()).decode()
-        payload={"BusinessShortCode":business_shortcode,"Password":password,"Timestamp":ts,"TransactionType":tx_type,"Amount":int(amount),"PartyA":phone,"PartyB":(c.get("DARAJA_TILL_NUMBER") if tx_type=="CustomerBuyGoodsOnline" and c.get("DARAJA_TILL_NUMBER") else c["DARAJA_SHORTCODE"]),"PhoneNumber":phone,"CallBackURL":c["DARAJA_CALLBACK_URL"],"AccountReference":str(d.get("accountReference","Invoice"))[:12],"TransactionDesc":str(d.get("description","Payment"))[:13]}
-        r=rq.post(c["DARAJA_BASE_URL"]+"/mpesa/stkpush/v1/processrequest",headers={"Authorization":"Bearer "+token},json=payload,timeout=30);data=r.json()
-    except Exception as e:return jsonify(error=f"Daraja request failed: {e}"),502
-    pid=db().payments.insert_one({"businessId":b["_id"],"amount":amount,"currency":"KES","phone":phone,"status":"PENDING","method":"M-Pesa STK","checkoutRequestId":data.get("CheckoutRequestID"),"merchantRequestId":data.get("MerchantRequestID"),"createdAt":now()}).inserted_id;audit(db(),str(u["_id"]),"PAYMENT_STK_INITIATED",str(pid));return jsonify(message=data.get("CustomerMessage") or "STK push initiated",payment=clean({"_id":pid,**data}))
+        phone_norm="".join(ch for ch in str(phone or "") if ch.isdigit())
+        if phone_norm.startswith("0") and len(phone_norm)==10: phone_norm="254"+phone_norm[1:]
+        elif phone_norm.startswith("+"): phone_norm=phone_norm[1:]
+        if not re.fullmatch(r"254[17]\d{8}",phone_norm): return jsonify(error="Enter a valid Kenyan mobile number, e.g. 0712345678 or 254712345678"),400
+        amount_int=int(round(amount))
+        if amount_int<1:return jsonify(error="Payment amount must be at least KES 1"),400
+        r=daraja_stk_push(phone_norm,amount_int,str(d.get("accountReference","Invoice")),str(d.get("description","Payment")))
+    except DarajaSTKError as e:
+        # Create a failure record as well, so Admin → Payments can see the exact provider rejection.
+        pid=db().payments.insert_one({"businessId":b["_id"],"amount":amount,"currency":"KES","phone":phone,"status":"FAILED","method":"M-Pesa STK","failureReason":e.message[:500],"darajaError":e.message[:500],"darajaErrorCode":e.code,"providerStatusCode":e.http_status,"providerResponse":e.response,"createdAt":now(),"failedAt":now()}).inserted_id
+        audit(db(),str(u["_id"]),"PAYMENT_STK_FAILED",str(pid),{"reason":e.message[:300],"darajaErrorCode":e.code,"httpStatus":e.http_status})
+        return jsonify(error=f"M-Pesa could not start: {e.message}",darajaError=e.message,darajaErrorCode=e.code,paymentId=str(pid),retryable=True),502
+    except Exception as e:
+        pid=db().payments.insert_one({"businessId":b["_id"],"amount":amount,"currency":"KES","phone":phone,"status":"FAILED","method":"M-Pesa STK","failureReason":str(e)[:500],"darajaError":str(e)[:500],"createdAt":now(),"failedAt":now()}).inserted_id
+        audit(db(),str(u["_id"]),"PAYMENT_STK_FAILED",str(pid),{"reason":str(e)[:300]})
+        return jsonify(error=f"Daraja request failed: {e}",paymentId=str(pid),retryable=True),502
+    pid=db().payments.insert_one({"businessId":b["_id"],"amount":amount_int,"currency":"KES","phone":phone_norm,"status":"PENDING","method":"M-Pesa STK","checkoutRequestId":r.get("CheckoutRequestID"),"merchantRequestId":r.get("MerchantRequestID"),"providerResponse":r,"providerStatusCode":200,"createdAt":now()}).inserted_id
+    audit(db(),str(u["_id"]),"PAYMENT_STK_INITIATED",str(pid))
+    return jsonify(message=r.get("CustomerMessage") or "STK push initiated",payment=clean({"_id":pid,**r})),200
 
 @app.post("/api/mpesa/callback")
 @app.post("/api/webhooks/daraja")
@@ -598,8 +677,9 @@ def mpesa_callback():
             if metadata.get("TransactionDate") is not None:update["transactionDate"]=str(metadata.get("TransactionDate"))
             if metadata.get("PhoneNumber") is not None:update["paidPhone"]=str(metadata.get("PhoneNumber"))
             if status!="PAID":
-                update["failureReason"]=result_description
-                update["darajaError"]=result_description
+                update["failureReason"]=result_description or "M-Pesa payment failed."
+                update["darajaError"]=result_description or "M-Pesa payment failed."
+                update["darajaErrorCode"]=code
                 update["failedAt"]=now()
             db().payments.update_one({"_id":payment["_id"]},{"$set":update})
             if payment.get("invoiceId"):
