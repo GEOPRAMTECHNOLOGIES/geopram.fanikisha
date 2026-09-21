@@ -12,8 +12,8 @@ A MongoDB-backed WhatsApp Business Automation SaaS with separate client and admi
 - Keyword automation rules that can automatically reply to incoming messages.
 - Customer/CRM CRUD with tags and notes.
 - Client AI configuration with encrypted OpenAI credentials and response generation.
-- M-Pesa payment recording and Daraja STK Push/callback workflow when the existing environment is configured.
-- Subscription plans and client subscriptions.
+- M-Pesa payment recording and Daraja STK Push/callback workflow when the existing environment is configured, with separate Daraja Short Code and receiving Till handling.
+- Subscription plans and client subscriptions, with Admin create/edit/activate/deactivate controls.
 - Invoice, receipt and document records.
 - Operational reports and CSV exports.
 - Email delivery for verification and document sending using existing SMTP configuration.
